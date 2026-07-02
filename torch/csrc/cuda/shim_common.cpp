@@ -58,6 +58,40 @@ AOTITorchError torch_cuda_stream_synchronize(
   });
 }
 
+AOTITorchError torch_cuda_get_device_multiprocessor_count(
+    int32_t device_index,
+    int32_t* ret_sm_count) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret_sm_count = at::cuda::getDeviceProperties(
+                        static_cast<c10::DeviceIndex>(device_index))
+                        ->multiProcessorCount;
+  });
+}
+
+AOTITorchError torch_cuda_get_device_compute_capability(
+    int32_t device_index,
+    int32_t* ret_major,
+    int32_t* ret_minor) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    cudaDeviceProp* prop = at::cuda::getDeviceProperties(
+        static_cast<c10::DeviceIndex>(device_index));
+    *ret_major = prop->major;
+    *ret_minor = prop->minor;
+  });
+}
+
+AOTITorchError torch_get_cuda_stream_from_external(
+    void* ext_stream,
+    int32_t device_index,
+    StreamHandle* ret_stream) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    c10::Stream stream = at::cuda::getStreamFromExternal(
+        static_cast<cudaStream_t>(ext_stream),
+        static_cast<c10::DeviceIndex>(device_index));
+    *ret_stream = reinterpret_cast<StreamHandle>(new c10::Stream(stream));
+  });
+}
+
 AOTITorchError torch_c10_cuda_check_msg(
     int32_t err,
     const char* filename,

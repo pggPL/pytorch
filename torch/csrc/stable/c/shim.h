@@ -286,6 +286,172 @@ AOTI_TORCH_EXPORT AOTITorchError torch_generator_get_device(
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
+/**
+ * The beginning of all shims added in 2.14.0 onwards.
+ */
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
+
+// Opaque handle to a heap-allocated at::Scalar. A Scalar is a tagged variant
+// (bool / int / double / complex<double>) and therefore cannot use the trivial
+// 64-bit StableIValue reinterpret convention that int/double/bool use; it is
+// passed by handle instead, mirroring StringHandle. The handle owns the
+// underlying Scalar and must be freed with torch_delete_scalar (or handed off
+// to a dispatch call, which frees it).
+struct ScalarOpaque;
+using ScalarHandle = ScalarOpaque*;
+
+// Constructors: return a new owning ScalarHandle. The callee is responsible for
+// freeing it with torch_delete_scalar.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_new_scalar_int(int64_t value, ScalarHandle* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_new_scalar_double(double value, ScalarHandle* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_new_scalar_bool(bool value, ScalarHandle* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_new_scalar_complex_double(double real, double imag, ScalarHandle* ret);
+
+// Discriminators mirroring c10::Scalar's tag. Exactly one of is_bool / is_int /
+// is_double / is_complex_double is true for any valid Scalar.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_is_int(ScalarHandle handle, bool* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_is_double(ScalarHandle handle, bool* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_is_bool(ScalarHandle handle, bool* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_is_complex_double(ScalarHandle handle, bool* ret);
+
+// Typed getters. The caller is responsible for querying the discriminator
+// first; these follow c10::Scalar's own (lossy) cross-type conversion
+// semantics.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_to_int(ScalarHandle handle, int64_t* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_to_double(ScalarHandle handle, double* ret);
+AOTI_TORCH_EXPORT AOTITorchError
+torch_scalar_to_bool(ScalarHandle handle, bool* ret);
+AOTI_TORCH_EXPORT AOTITorchError torch_scalar_to_complex_double(
+    ScalarHandle handle,
+    double* ret_real,
+    double* ret_imag);
+
+// Frees an owning ScalarHandle previously returned by torch_new_scalar_* (or
+// otherwise handed off with ownership).
+AOTI_TORCH_EXPORT AOTITorchError torch_delete_scalar(ScalarHandle handle);
+
+// Opaque handle to a c10d::ProcessGroup (held by an internal
+// c10::intrusive_ptr, so the handle keeps the group alive). Obtained from a
+// Python torch.distributed.ProcessGroup via torch_processgroup_from_pyobject
+// (see torch/csrc/stable/python/c/shim.h) and freed with
+// torch_delete_processgroup. All functions below require a libtorch built with
+// USE_DISTRIBUTED; otherwise they return an error.
+struct ProcessGroupOpaque;
+using ProcessGroupHandle = ProcessGroupOpaque*;
+
+// Opaque handle to a c10d::Work (held by an internal c10::intrusive_ptr). The
+// collectives below return a new owning WorkHandle representing the async
+// operation. The caller must eventually free it with torch_delete_work; call
+// torch_work_wait first to block until the collective completes.
+struct WorkOpaque;
+using WorkHandle = WorkOpaque*;
+
+// ReduceOp encoding for the collectives below. These values match
+// c10d::ReduceOp::RedOpType, so the ordinal is part of the ABI contract:
+//   SUM=0, AVG=1, PRODUCT=2, MIN=3, MAX=4, BAND=5, BOR=6, BXOR=7.
+// PREMUL_SUM is intentionally unsupported (it needs a scaling factor).
+
+// Frees an owning ProcessGroupHandle. Does not affect the underlying process
+// group beyond dropping this reference.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_delete_processgroup(ProcessGroupHandle pg);
+
+AOTI_TORCH_EXPORT AOTITorchError
+torch_processgroup_rank(ProcessGroupHandle pg, int32_t* ret_rank);
+
+AOTI_TORCH_EXPORT AOTITorchError
+torch_processgroup_size(ProcessGroupHandle pg, int32_t* ret_size);
+
+// Sets *ret to true iff the group's backend type is NCCL.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_processgroup_backend_is_nccl(ProcessGroupHandle pg, bool* ret);
+
+// Collectives. Each takes borrowed tensor handles, launches the async op, and
+// returns a new owning WorkHandle in *ret_work. reduce_op uses the encoding
+// documented above.
+AOTI_TORCH_EXPORT AOTITorchError torch_processgroup_allreduce(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int32_t reduce_op,
+    WorkHandle* ret_work);
+
+AOTI_TORCH_EXPORT AOTITorchError torch_processgroup_allreduce_coalesced(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int32_t reduce_op,
+    WorkHandle* ret_work);
+
+AOTI_TORCH_EXPORT AOTITorchError torch_processgroup_broadcast(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int64_t root_rank,
+    WorkHandle* ret_work);
+
+// allgather restricted to the single-input / single-output-group form: gathers
+// the one `input` tensor from every rank into `output` (num_output tensors,
+// one per rank).
+AOTI_TORCH_EXPORT AOTITorchError torch_processgroup_allgather(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* output,
+    size_t num_output,
+    AtenTensorHandle input,
+    WorkHandle* ret_work);
+
+AOTI_TORCH_EXPORT AOTITorchError
+torch_processgroup_barrier(ProcessGroupHandle pg, WorkHandle* ret_work);
+
+// Blocks until the work completes. ret_completed receives the bool returned by
+// c10d::Work::wait (whether the work completed; it may also throw on error,
+// which is converted to an error code).
+AOTI_TORCH_EXPORT AOTITorchError
+torch_work_wait(WorkHandle work, bool* ret_completed);
+
+// Frees an owning WorkHandle previously returned by a collective.
+AOTI_TORCH_EXPORT AOTITorchError torch_delete_work(WorkHandle work);
+
+#ifdef USE_CUDA
+
+// Returns the number of streaming multiprocessors (SMs) on the CUDA device with
+// the given index. Reads cudaDeviceProp::multiProcessorCount for that device.
+AOTI_TORCH_EXPORT AOTITorchError torch_cuda_get_device_multiprocessor_count(
+    int32_t device_index,
+    int32_t* ret_sm_count);
+
+// Returns the CUDA compute capability of the device with the given index as
+// separate major and minor components (cudaDeviceProp::major / ::minor). The
+// "sm_arch" used by kernel launch config is major * 10 + minor.
+AOTI_TORCH_EXPORT AOTITorchError torch_cuda_get_device_compute_capability(
+    int32_t device_index,
+    int32_t* ret_major,
+    int32_t* ret_minor);
+
+// Wraps an externally-owned cudaStream_t in a new owning StreamHandle bound to
+// the given device. The returned handle must be freed with
+// aoti_torch_delete_stream; doing so frees only the wrapper, not the underlying
+// cudaStream_t (its lifetime remains the caller's responsibility). ext_stream
+// is a cudaStream_t passed as void*.
+AOTI_TORCH_EXPORT AOTITorchError torch_get_cuda_stream_from_external(
+    void* ext_stream,
+    int32_t device_index,
+    StreamHandle* ret_stream);
+
+#endif // USE_CUDA
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

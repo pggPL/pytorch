@@ -5,6 +5,7 @@
 #include <torch/csrc/stable/device_struct.h>
 #include <torch/csrc/stable/generator_struct.h>
 #include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/scalar_struct.h>
 #include <torch/csrc/stable/tensor_struct.h>
 #include <torch/headeronly/core/DeviceType.h>
 #include <torch/headeronly/core/Layout.h>
@@ -310,6 +311,37 @@ struct FromImpl<torch::stable::Generator> {
   }
 };
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
+// Specialization for torch::stable::Scalar => StableIValue
+// Returns a new owning ScalarHandle, which the dispatcher (to_ivalue) frees.
+// We create a fresh handle from the wrapper's value so that the wrapper keeps
+// ownership of its own handle.
+template <>
+struct FromImpl<torch::stable::Scalar> {
+  static StableIValue call(
+      const torch::stable::Scalar& val,
+      [[maybe_unused]] uint64_t extension_build_version,
+      [[maybe_unused]] bool is_internal) {
+    ScalarHandle new_handle = nullptr;
+    if (val.isBool()) {
+      STABLE_TORCH_ERROR_CODE_CHECK(
+          torch_new_scalar_bool(val.toBool(), &new_handle));
+    } else if (val.isInt()) {
+      STABLE_TORCH_ERROR_CODE_CHECK(
+          torch_new_scalar_int(val.toInt(), &new_handle));
+    } else if (val.isComplex()) {
+      std::complex<double> value = val.toComplexDouble();
+      STABLE_TORCH_ERROR_CODE_CHECK(torch_new_scalar_complex_double(
+          value.real(), value.imag(), &new_handle));
+    } else {
+      STABLE_TORCH_ERROR_CODE_CHECK(
+          torch_new_scalar_double(val.toDouble(), &new_handle));
+    }
+    return torch::stable::detail::from(new_handle);
+  }
+};
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
 
 // =============================================================================
 // FROM CONVERSIONS requiring TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
@@ -683,6 +715,22 @@ struct ToImpl<torch::stable::Generator> {
   }
 };
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
+// Specialization for StableIValue => torch::stable::Scalar
+// The resulting stable::Scalar steals ownership of the input's underlying
+// ScalarHandle.
+template <>
+struct ToImpl<torch::stable::Scalar> {
+  static torch::stable::Scalar call(
+      StableIValue val,
+      [[maybe_unused]] uint64_t extension_build_version,
+      [[maybe_unused]] bool is_internal) {
+    return torch::stable::Scalar(
+        torch::stable::detail::to<ScalarHandle>(val));
+  }
+};
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
 
 // =============================================================================
 // TO CONVERSIONS requiring TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0

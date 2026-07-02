@@ -1,5 +1,6 @@
 #include <c10/core/Device.h>
 #include <c10/core/DispatchKey.h>
+#include <c10/core/Scalar.h>
 #include <c10/core/Stream.h>
 #include <c10/util/Exception.h>
 #include <torch/csrc/inductor/aoti_runtime/utils.h>
@@ -18,6 +19,7 @@
 #include <ATen/Parallel.h>
 #include <torch/csrc/shim_conversion_utils.h>
 #include <torch/csrc/shim_exception_state.h>
+#include <torch/csrc/shim_processgroup_internal.h>
 #include <torch/csrc/stable/c/shim.h>
 
 AOTITorchError torch_new_list_reserve_size(size_t size, StableListHandle* ret) {
@@ -73,6 +75,14 @@ torch_delete_list(StableListHandle list_handle) {
   });
 }
 
+static at::Scalar* scalar_handle_to_pointer(ScalarHandle handle) {
+  return reinterpret_cast<at::Scalar*>(handle);
+}
+
+static ScalarHandle scalar_pointer_to_handle(at::Scalar* ptr) {
+  return reinterpret_cast<ScalarHandle>(ptr);
+}
+
 static StableIValue from_ivalue(
     const c10::TypePtr& type,
     const c10::IValue& ivalue,
@@ -98,6 +108,13 @@ static StableIValue from_ivalue(
     case c10::TypeKind::ScalarTypeType: {
       return torch::stable::detail::_from(
           ivalue.toScalarType(), extension_build_version);
+    }
+    case c10::TypeKind::NumberType: {
+      // Scalar is a tagged variant, so it is passed by handle to a heap
+      // at::Scalar. to_ivalue (or torch_delete_scalar) frees the handle.
+      auto* scalar_ptr = new at::Scalar(ivalue.toScalar());
+      return torch::stable::detail::_from(
+          scalar_pointer_to_handle(scalar_ptr), extension_build_version);
     }
     case c10::TypeKind::DeviceObjType: {
       // Pack device type and index into StableIValue in platform-independent
@@ -213,6 +230,14 @@ static c10::IValue to_ivalue(
     case c10::TypeKind::ScalarTypeType: {
       return c10::IValue(torch::stable::detail::_to<c10::ScalarType>(
           stable_ivalue, extension_build_version));
+    }
+    case c10::TypeKind::NumberType: {
+      // Scalar is passed by handle to a heap at::Scalar; steal it into the
+      // IValue and free the handle.
+      std::unique_ptr<at::Scalar> scalar_ptr(scalar_handle_to_pointer(
+          torch::stable::detail::_to<ScalarHandle>(
+              stable_ivalue, extension_build_version)));
+      return c10::IValue(*scalar_ptr);
     }
     case c10::TypeKind::DeviceObjType: {
       // Unpack device type and index from StableIValue
@@ -843,6 +868,82 @@ AOTITorchError torch_generator_get_device(
   });
 }
 
+AOTITorchError torch_new_scalar_int(int64_t value, ScalarHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_pointer_to_handle(new at::Scalar(value)); });
+}
+
+AOTITorchError torch_new_scalar_double(double value, ScalarHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_pointer_to_handle(new at::Scalar(value)); });
+}
+
+AOTITorchError torch_new_scalar_bool(bool value, ScalarHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_pointer_to_handle(new at::Scalar(value)); });
+}
+
+AOTITorchError
+torch_new_scalar_complex_double(double real, double imag, ScalarHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret = scalar_pointer_to_handle(
+        new at::Scalar(c10::complex<double>(real, imag)));
+  });
+}
+
+AOTITorchError torch_scalar_is_int(ScalarHandle handle, bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret = scalar_handle_to_pointer(handle)->isIntegral(/*includeBool=*/false);
+  });
+}
+
+AOTITorchError torch_scalar_is_double(ScalarHandle handle, bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->isFloatingPoint(); });
+}
+
+AOTITorchError torch_scalar_is_bool(ScalarHandle handle, bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->isBoolean(); });
+}
+
+AOTITorchError torch_scalar_is_complex_double(ScalarHandle handle, bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->isComplex(); });
+}
+
+AOTITorchError torch_scalar_to_int(ScalarHandle handle, int64_t* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->toLong(); });
+}
+
+AOTITorchError torch_scalar_to_double(ScalarHandle handle, double* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->toDouble(); });
+}
+
+AOTITorchError torch_scalar_to_bool(ScalarHandle handle, bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret = scalar_handle_to_pointer(handle)->toBool(); });
+}
+
+AOTITorchError torch_scalar_to_complex_double(
+    ScalarHandle handle,
+    double* ret_real,
+    double* ret_imag) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    c10::complex<double> value =
+        scalar_handle_to_pointer(handle)->toComplexDouble();
+    *ret_real = value.real();
+    *ret_imag = value.imag();
+  });
+}
+
+AOTITorchError torch_delete_scalar(ScalarHandle handle) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { delete scalar_handle_to_pointer(handle); });
+}
+
 AOTI_TORCH_EXPORT const char* torch_exception_get_what() {
   return torch::csrc::shim::details ::get_torch_exception_what().c_str();
 }
@@ -852,3 +953,211 @@ AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace() {
       get_torch_exception_what_without_backtrace()
           .c_str();
 }
+
+#ifdef USE_DISTRIBUTED
+
+namespace {
+
+std::vector<at::Tensor> tensor_handles_to_vector(
+    AtenTensorHandle* tensors,
+    size_t num_tensors) {
+  std::vector<at::Tensor> out;
+  out.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    out.push_back(
+        *torch::aot_inductor::tensor_handle_to_tensor_pointer(tensors[i]));
+  }
+  return out;
+}
+
+c10d::ReduceOp to_reduce_op(int32_t reduce_op) {
+  TORCH_CHECK(
+      reduce_op >= 0 && reduce_op < c10d::ReduceOp::RedOpType::PREMUL_SUM,
+      "Unsupported ReduceOp value ",
+      reduce_op,
+      " for the stable c10d shim (PREMUL_SUM and above are not supported)");
+  return c10d::ReduceOp(
+      static_cast<c10d::ReduceOp::RedOpType>(reduce_op));
+}
+
+WorkHandle new_work_handle(c10::intrusive_ptr<c10d::Work> work) {
+  return work_pointer_to_handle(new WorkOpaque{std::move(work)});
+}
+
+} // namespace
+
+AOTITorchError torch_delete_processgroup(ProcessGroupHandle pg) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { delete processgroup_handle_to_pointer(pg); });
+}
+
+AOTITorchError torch_processgroup_rank(
+    ProcessGroupHandle pg,
+    int32_t* ret_rank) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret_rank = processgroup_handle_to_pointer(pg)->pg->getRank();
+  });
+}
+
+AOTITorchError torch_processgroup_size(
+    ProcessGroupHandle pg,
+    int32_t* ret_size) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret_size = processgroup_handle_to_pointer(pg)->pg->getSize();
+  });
+}
+
+AOTITorchError torch_processgroup_backend_is_nccl(
+    ProcessGroupHandle pg,
+    bool* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret = processgroup_handle_to_pointer(pg)->pg->getBackendType() ==
+        c10d::ProcessGroup::BackendType::NCCL;
+  });
+}
+
+AOTITorchError torch_processgroup_allreduce(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int32_t reduce_op,
+    WorkHandle* ret_work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    auto tensor_vec = tensor_handles_to_vector(tensors, num_tensors);
+    c10d::AllreduceOptions opts;
+    opts.reduceOp = to_reduce_op(reduce_op);
+    *ret_work = new_work_handle(
+        processgroup_handle_to_pointer(pg)->pg->allreduce(tensor_vec, opts));
+  });
+}
+
+AOTITorchError torch_processgroup_allreduce_coalesced(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int32_t reduce_op,
+    WorkHandle* ret_work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    auto tensor_vec = tensor_handles_to_vector(tensors, num_tensors);
+    c10d::AllreduceCoalescedOptions opts;
+    opts.reduceOp = to_reduce_op(reduce_op);
+    *ret_work = new_work_handle(
+        processgroup_handle_to_pointer(pg)->pg->allreduce_coalesced(
+            tensor_vec, opts));
+  });
+}
+
+AOTITorchError torch_processgroup_broadcast(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* tensors,
+    size_t num_tensors,
+    int64_t root_rank,
+    WorkHandle* ret_work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    auto tensor_vec = tensor_handles_to_vector(tensors, num_tensors);
+    c10d::BroadcastOptions opts;
+    opts.rootRank = root_rank;
+    *ret_work = new_work_handle(
+        processgroup_handle_to_pointer(pg)->pg->broadcast(tensor_vec, opts));
+  });
+}
+
+AOTITorchError torch_processgroup_allgather(
+    ProcessGroupHandle pg,
+    AtenTensorHandle* output,
+    size_t num_output,
+    AtenTensorHandle input,
+    WorkHandle* ret_work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    std::vector<std::vector<at::Tensor>> output_tensors(1);
+    output_tensors[0] = tensor_handles_to_vector(output, num_output);
+    std::vector<at::Tensor> input_tensors = {
+        *torch::aot_inductor::tensor_handle_to_tensor_pointer(input)};
+    *ret_work = new_work_handle(
+        processgroup_handle_to_pointer(pg)->pg->allgather(
+            output_tensors, input_tensors));
+  });
+}
+
+AOTITorchError torch_processgroup_barrier(
+    ProcessGroupHandle pg,
+    WorkHandle* ret_work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    *ret_work =
+        new_work_handle(processgroup_handle_to_pointer(pg)->pg->barrier());
+  });
+}
+
+AOTITorchError torch_work_wait(WorkHandle work, bool* ret_completed) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { *ret_completed = work_handle_to_pointer(work)->work->wait(); });
+}
+
+AOTITorchError torch_delete_work(WorkHandle work) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
+      { delete work_handle_to_pointer(work); });
+}
+
+#else // USE_DISTRIBUTED
+
+namespace {
+constexpr const char* kNoDistributed =
+    "This libtorch was built without USE_DISTRIBUTED; the stable c10d "
+    "ProcessGroup shim is unavailable.";
+} // namespace
+
+AOTITorchError torch_delete_processgroup(ProcessGroupHandle) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_rank(ProcessGroupHandle, int32_t*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_size(ProcessGroupHandle, int32_t*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_backend_is_nccl(ProcessGroupHandle, bool*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_allreduce(
+    ProcessGroupHandle,
+    AtenTensorHandle*,
+    size_t,
+    int32_t,
+    WorkHandle*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_allreduce_coalesced(
+    ProcessGroupHandle,
+    AtenTensorHandle*,
+    size_t,
+    int32_t,
+    WorkHandle*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_broadcast(
+    ProcessGroupHandle,
+    AtenTensorHandle*,
+    size_t,
+    int64_t,
+    WorkHandle*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_allgather(
+    ProcessGroupHandle,
+    AtenTensorHandle*,
+    size_t,
+    AtenTensorHandle,
+    WorkHandle*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_processgroup_barrier(ProcessGroupHandle, WorkHandle*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_work_wait(WorkHandle, bool*) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+AOTITorchError torch_delete_work(WorkHandle) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({ TORCH_CHECK(false, kNoDistributed); });
+}
+
+#endif // USE_DISTRIBUTED

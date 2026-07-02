@@ -198,7 +198,7 @@ You can always work with StableIValue abstractions in your custom kernel for typ
 | torch::stable::Device | raw bitwise copy of index and type into leading bytes of uint64_t | c10::Device | Device |
 | ? | ? | c10::Stream | Stream |
 | ? | ? | c10::complex<double> | complex |
-| ? | ? | at::Scalar | Scalar |
+| torch::stable::Scalar | raw bitwise copy into leading bytes of uint64_t of an owning ScalarHandle (pointer to a new heap at::Scalar that carries the variant tag). Scalar is a variant (bool/int/double/complex) so it cannot use the trivial in-place representation. | at::Scalar | Scalar |
 | std::string/std::string_view | raw bitwise copy of underlying StringHandle into leading bytes of uint64_t | std::string/const char*/ivalue::ConstantString | str |
 | ? | ? | at::Storage | Storage |
 | ? | ? | at::Generator | Generator |

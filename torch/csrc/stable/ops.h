@@ -1,5 +1,6 @@
 #pragma once
 
+#include <torch/csrc/stable/scalar_struct.h>
 #include <torch/csrc/stable/stableivalue_conversions.h>
 #include <array>
 #include <cstdint>
@@ -546,6 +547,27 @@ inline torch::stable::Tensor matmul(
 #else
   STABLE_TORCH_ERROR_CODE_CHECK(
       aoti_torch_call_dispatcher("aten::matmul", "", stack.data()));
+#endif
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+/// Stable version of the reciprocal op.
+///
+/// Computes the reciprocal (1 / x) of each element of the input tensor.
+///
+/// Minimum compatible version: PyTorch 2.9.
+///
+/// @param self The input tensor.
+/// @return A new tensor containing the element-wise reciprocal.
+inline torch::stable::Tensor reciprocal(const torch::stable::Tensor& self) {
+  const auto num_args = 1;
+  std::array<StableIValue, num_args> stack{torch::stable::detail::from(self)};
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::reciprocal", "", stack.data(), TORCH_ABI_VERSION));
+#else
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      aoti_torch_call_dispatcher("aten::reciprocal", "", stack.data()));
 #endif
   return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
 }
@@ -1134,6 +1156,159 @@ inline torch::stable::Tensor full(
 
   return torch::stable::Tensor(ret0);
 }
+
+/// Stable version of the zeros.default op.
+///
+/// Creates a tensor of the specified size filled with zeros.
+///
+/// Minimum compatible version: PyTorch 2.10.
+///
+/// @param size The desired size of the output tensor.
+/// @param dtype Optional scalar type for the tensor elements.
+/// @param layout Optional memory layout.
+/// @param device Optional device to place the tensor on.
+/// @param pin_memory Optional flag to use pinned memory.
+/// @return A new zero-filled tensor with the specified properties.
+inline torch::stable::Tensor zeros(
+    torch::headeronly::IntHeaderOnlyArrayRef size,
+    std::optional<torch::headeronly::ScalarType> dtype = std::nullopt,
+    std::optional<torch::headeronly::Layout> layout = std::nullopt,
+    std::optional<torch::stable::Device> device = std::nullopt,
+    std::optional<bool> pin_memory = std::nullopt) {
+  const auto num_args = 5;
+  std::array<StableIValue, num_args> stack{
+      torch::stable::detail::from(size),
+      torch::stable::detail::from(dtype),
+      torch::stable::detail::from(layout),
+      torch::stable::detail::from(device),
+      torch::stable::detail::from(pin_memory)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::zeros", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
+// The ops below take torch::stable::Scalar arguments, which requires the Scalar
+// StableIValue conversion introduced in 2.14.
+
+/// Stable version of the arange.default op (end only).
+///
+/// Returns a 1-D tensor with values from the interval [0, end) taken with a
+/// common step of 1, beginning from 0.
+///
+/// Minimum compatible version: PyTorch 2.14.
+///
+/// @param end The exclusive upper bound of the interval.
+/// @param dtype Optional scalar type for the tensor elements.
+/// @param layout Optional memory layout.
+/// @param device Optional device to place the tensor on.
+/// @param pin_memory Optional flag to use pinned memory.
+/// @return A new 1-D tensor containing the range of values.
+inline torch::stable::Tensor arange(
+    torch::stable::Scalar end,
+    std::optional<torch::headeronly::ScalarType> dtype = std::nullopt,
+    std::optional<torch::headeronly::Layout> layout = std::nullopt,
+    std::optional<torch::stable::Device> device = std::nullopt,
+    std::optional<bool> pin_memory = std::nullopt) {
+  const auto num_args = 5;
+  std::array<StableIValue, num_args> stack{
+      torch::stable::detail::from(end),
+      torch::stable::detail::from(dtype),
+      torch::stable::detail::from(layout),
+      torch::stable::detail::from(device),
+      torch::stable::detail::from(pin_memory)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::arange", "", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+/// Stable version of the arange.start_step op.
+///
+/// Returns a 1-D tensor with values from the interval [start, end) taken with
+/// the given step.
+///
+/// Minimum compatible version: PyTorch 2.14.
+///
+/// @param start The inclusive lower bound of the interval.
+/// @param end The exclusive upper bound of the interval.
+/// @param step The gap between consecutive values. Defaults to 1.
+/// @param dtype Optional scalar type for the tensor elements.
+/// @param layout Optional memory layout.
+/// @param device Optional device to place the tensor on.
+/// @param pin_memory Optional flag to use pinned memory.
+/// @return A new 1-D tensor containing the range of values.
+inline torch::stable::Tensor arange(
+    torch::stable::Scalar start,
+    torch::stable::Scalar end,
+    torch::stable::Scalar step = 1,
+    std::optional<torch::headeronly::ScalarType> dtype = std::nullopt,
+    std::optional<torch::headeronly::Layout> layout = std::nullopt,
+    std::optional<torch::stable::Device> device = std::nullopt,
+    std::optional<bool> pin_memory = std::nullopt) {
+  const auto num_args = 7;
+  std::array<StableIValue, num_args> stack{
+      torch::stable::detail::from(start),
+      torch::stable::detail::from(end),
+      torch::stable::detail::from(step),
+      torch::stable::detail::from(dtype),
+      torch::stable::detail::from(layout),
+      torch::stable::detail::from(device),
+      torch::stable::detail::from(pin_memory)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::arange", "start_step", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+/// Stable version of the add.Tensor op.
+///
+/// Adds other, scaled by alpha, to self. Computes: self + alpha * other.
+///
+/// Minimum compatible version: PyTorch 2.14.
+///
+/// @param self The input tensor.
+/// @param other The tensor to add.
+/// @param alpha The scaling factor for other. Defaults to 1.
+/// @return The result of self + alpha * other.
+inline torch::stable::Tensor add(
+    const torch::stable::Tensor& self,
+    const torch::stable::Tensor& other,
+    torch::stable::Scalar alpha = 1) {
+  const auto num_args = 3;
+  std::array<StableIValue, num_args> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(other),
+      torch::stable::detail::from(alpha)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::add", "Tensor", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+/// Stable version of the add.Scalar op.
+///
+/// Adds a scalar other, scaled by alpha, to self. Computes:
+/// self + alpha * other.
+///
+/// Minimum compatible version: PyTorch 2.14.
+///
+/// @param self The input tensor.
+/// @param other The scalar value to add.
+/// @param alpha The scaling factor for other. Defaults to 1.
+/// @return The result of self + alpha * other.
+inline torch::stable::Tensor add(
+    const torch::stable::Tensor& self,
+    torch::stable::Scalar other,
+    torch::stable::Scalar alpha = 1) {
+  const auto num_args = 3;
+  std::array<StableIValue, num_args> stack{
+      torch::stable::detail::from(self),
+      torch::stable::detail::from(other),
+      torch::stable::detail::from(alpha)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::add", "Scalar", stack.data(), TORCH_ABI_VERSION));
+  return torch::stable::detail::to<torch::stable::Tensor>(stack[0]);
+}
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
 
