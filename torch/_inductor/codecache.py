@@ -748,6 +748,16 @@ class FxGraphCachePickler(pickle.Pickler):
         # type/class objects natively via GLOBAL opcode).
         if t in self.dispatch_table or isinstance(obj, _PICKLE_NATIVE_TYPES_TUPLE):
             return NotImplemented
+        # Real objects of registered opaque types reach the pickler directly
+        # (e.g. in example_inputs). Mirror _reduce_fake_script_object: hoisted
+        # member-less opaque types are instance-agnostic, so reduce to the
+        # registered type name instead of bypassing the cache.
+        if (
+            opaque_object.is_custom_class(t)
+            and opaque_object.should_hoist(t)
+            and not opaque_object.has_members(t)
+        ):
+            return (_ident, (opaque_object.get_opaque_type_name(t),))
         # Fast path: type already probed.
         if (pickleable := self._pickleable_type_cache.get(t)) is not None:
             if not pickleable:

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import types
 import unittest
 import warnings
@@ -335,6 +336,32 @@ class _CyclicOpaque(torch._custom_class_base.CustomClassBase):
 
 if not torch._library.opaque_object.is_custom_class(_CyclicOpaque):
     torch._library.opaque_object.register_custom_class(_CyclicOpaque, typ="symbolic")
+
+
+class _HoistedOpaque:
+    """Test helper: hoisted member-less custom class (constant type).
+
+    Holds a lock so default pickling fails, like real opaque objects
+    (e.g. ProcessGroup).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def __eq__(self, other):
+        return isinstance(other, _HoistedOpaque)
+
+    def __hash__(self):
+        return hash(_HoistedOpaque)
+
+    def __fx_repr__(self):
+        return ("_HoistedOpaque()", {})
+
+
+if not torch._library.opaque_object.is_custom_class(_HoistedOpaque):
+    torch._library.opaque_object.register_custom_class(
+        _HoistedOpaque, typ="constant", hoist=True
+    )
 
 
 def _custom_empty(*args: object, **kwargs: object) -> None:
@@ -4444,6 +4471,23 @@ class TestFxGraphCacheHashing(TestCase):
         # so the memo table can track the cycle.
         data = pickler.dumps(fake)
         self.assertIsNotNone(data)
+
+    def test_pickle_real_hoisted_opaque_object(self):
+        """
+        Test that FxGraphCachePickler reduces a real (non-fake) instance of a
+        hoisted member-less custom class to its registered type name, the same
+        way _reduce_fake_script_object handles the FakeScriptObject form.
+        Before the fix, such objects fell through to default pickling and
+        bypassed the FX graph cache when unpicklable.
+        """
+        gm = torch.fx.GraphModule({}, torch.fx.Graph())
+        pickler = FxGraphCachePickler(gm)
+        data = pickler.dumps(_HoistedOpaque())
+        self.assertIsNotNone(data)
+        # Instance-agnostic: distinct instances hash identically.
+        self.assertEqual(
+            pickler.get_hash(_HoistedOpaque()), pickler.get_hash(_HoistedOpaque())
+        )
 
     def test_get_hash_for_files(self):
         """
