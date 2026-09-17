@@ -981,7 +981,23 @@ def trace_frame(
         check_inst_exn_tab_entries_valid(instructions)
         instructions[:] = remove_pointless_jumps(remove_dead_code(instructions))
     except Exception as e:
-        e._torch_dynamo_tracer_output = DynamoTracerOutput(tracer, error=True)  # type: ignore[attr-defined]
+        entry = (
+            tracer.current_instruction.exn_tab_entry
+            if sys.version_info >= (3, 11)
+            else None
+        )
+        guarded_fallback = (
+            isinstance(e, Unsupported)
+            and e.skip_frame
+            and not one_graph
+            and not export
+            and package is None
+            and not tracer.error_on_graph_break
+            and not tracer.is_tracing_resume_prologue
+            and entry is not None
+            and (not tracer.block_stack or entry.target is not tracer.block_stack[-1].target)
+        )
+        e._torch_dynamo_tracer_output = DynamoTracerOutput(tracer, error=not guarded_fallback)  # type: ignore[attr-defined]
         raise
     return tracer_output
 
@@ -1675,6 +1691,20 @@ def compile_frame(  # type: ignore[return]
                     "worth the performance gain.",
                     hints=[],
                 )
+        except Unsupported as e:
+            tracer_output = getattr(e, "_torch_dynamo_tracer_output", None)
+            if tracer_output is None or tracer_output.output_graph is None:
+                raise
+            # A break in a protected region cannot be resumed safely. Cache the
+            # original code under the traced guards instead of skipping every
+            # future invocation of this code object, including other branches.
+            log.debug("Caching guarded eager fallback for %s: %s", code.co_name, e)
+            return DynamoOutput(
+                tracer_output=tracer_output,
+                bytecode=code.replace(),
+                pycode=[],
+                last_attempt_start_time=last_attempt_start_time,
+            )
         except exc.SkipFrame as e:
             if not isinstance(e, exc.TensorifyScalarRestartAnalysis):
                 TensorifyState.clear()
