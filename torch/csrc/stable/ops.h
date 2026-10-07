@@ -1391,4 +1391,39 @@ inline std::tuple<torch::stable::Tensor, torch::stable::Tensor> sort(
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_10_0
 
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
+/// Stable aten::add.Tensor, preserving Scalar alpha's type (2.16+).
+inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
+  std::array<StableIValue, 3> stack{
+      detail::from(self), detail::from(other), detail::from(alpha)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::add", "Tensor", stack.data(), TORCH_ABI_VERSION));
+  return detail::to<Tensor>(stack[0]);
+}
+
+/// Stable aten::arange.start_step with concrete Scalar bounds (2.16+).
+inline Tensor arange(
+    Scalar start,
+    Scalar end,
+    Scalar step = 1,
+    std::optional<ScalarType> dtype = std::nullopt,
+    std::optional<Layout> layout = std::nullopt,
+    std::optional<Device> device = std::nullopt,
+    std::optional<bool> pin_memory = std::nullopt) {
+  std::array<StableIValue, 7> stack{
+      detail::from(start),
+      detail::from(end),
+      detail::from(step),
+      detail::from(dtype),
+      detail::from(layout),
+      detail::from(device),
+      detail::from(pin_memory)};
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+      "aten::arange", "start_step", stack.data(), TORCH_ABI_VERSION));
+  return detail::to<Tensor>(stack[0]);
+}
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
 HIDDEN_NAMESPACE_END(torch, stable)

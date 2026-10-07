@@ -5,6 +5,7 @@
 #include <torch/csrc/stable/device_struct.h>
 #include <torch/csrc/stable/generator_struct.h>
 #include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/scalar.h>
 #include <torch/csrc/stable/tensor_struct.h>
 #include <torch/headeronly/core/DeviceType.h>
 #include <torch/headeronly/core/Layout.h>
@@ -16,6 +17,7 @@
 #include <torch/headeronly/util/Exception.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#include <array>
 #include <optional>
 
 HIDDEN_NAMESPACE_BEGIN(torch, stable, detail)
@@ -953,6 +955,78 @@ struct ToImpl<Tag> {
 // Expose the partially templated class functions through single functions
 // The non-private versions will be used by the extension or headers that
 // the extension includes.
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
+// Scalar wire format: an owning StableListHandle containing three words:
+// tag (0=bool, 1=int64, 2=double, 3=complex128), real bits, imaginary bits.
+// Primitive payloads use the same encoding as the corresponding StableIValue.
+template <>
+struct FromImpl<torch::stable::Scalar> {
+  static StableIValue call(
+      const torch::stable::Scalar& scalar,
+      uint64_t extension_build_version,
+      bool is_internal) {
+    std::array<StableIValue, 3> words{};
+    std::visit(
+        [&](const auto& value) {
+          using T = std::decay_t<decltype(value)>;
+          if constexpr (std::is_same_v<T, bool>) {
+            words[0] = 0;
+            words[1] = detail::from(value);
+          } else if constexpr (std::is_same_v<T, int64_t>) {
+            words[0] = 1;
+            words[1] = detail::from(value);
+          } else if constexpr (std::is_same_v<T, double>) {
+            words[0] = 2;
+            words[1] = detail::from(value);
+          } else {
+            words[0] = 3;
+            words[1] = detail::from(value.real());
+            words[2] = detail::from(value.imag());
+          }
+        },
+        scalar.value());
+    return FromImpl<torch::headeronly::HeaderOnlyArrayRef<StableIValue>>::call(
+        {words.data(), words.size()}, extension_build_version, is_internal);
+  }
+};
+
+template <>
+struct ToImpl<torch::stable::Scalar> {
+  static torch::stable::Scalar call(
+      StableIValue value,
+      [[maybe_unused]] uint64_t extension_build_version,
+      [[maybe_unused]] bool is_internal) {
+    auto list = detail::to<StableListHandle>(value);
+    std::unique_ptr<StableListOpaque, decltype(&torch_delete_list)> owner(
+        list, torch_delete_list);
+    size_t size = 0;
+    STABLE_TORCH_ERROR_CODE_CHECK(torch_list_size(list, &size));
+    STD_TORCH_CHECK(size == 3, "invalid Scalar payload size");
+    std::array<StableIValue, 3> words{};
+    for (size_t i = 0; i < words.size(); ++i) {
+      STABLE_TORCH_ERROR_CODE_CHECK(torch_list_get_item(list, i, &words[i]));
+    }
+    switch (words[0]) {
+      case 0:
+        STD_TORCH_CHECK(words[1] <= 1, "invalid Scalar bool payload");
+        return torch::stable::Scalar(words[1] != 0);
+      case 1:
+        return torch::stable::Scalar(detail::to<int64_t>(words[1]));
+      case 2:
+        return torch::stable::Scalar(detail::to<double>(words[1]));
+      case 3:
+        return torch::stable::Scalar(std::complex<double>(
+            detail::to<double>(words[1]), detail::to<double>(words[2])));
+      default:
+        STD_TORCH_CHECK(false, "invalid Scalar tag");
+    }
+  }
+};
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
 template <typename T>
 inline StableIValue from(T val) {
   return detail::FromImpl<T>::call(

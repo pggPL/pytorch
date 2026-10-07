@@ -188,7 +188,7 @@ You can always work with StableIValue abstractions in your custom kernel for typ
 | torch::stable::Device | raw bitwise copy of index and type into leading bytes of uint64_t | c10::Device | Device |
 | ? | ? | c10::Stream | Stream |
 | ? | ? | c10::complex<double> | complex |
-| ? | ? | at::Scalar | Scalar |
+| torch::stable::Scalar (2.16+) | owning StableListHandle with tag, real bits, and imaginary bits | at::Scalar | Scalar |
 | std::string/std::string_view | raw bitwise copy of underlying StringHandle into leading bytes of uint64_t | std::string/const char*/ivalue::ConstantString | str |
 | ? | ? | at::Storage | Storage |
 | ? | ? | at::Generator | Generator |
@@ -272,3 +272,24 @@ building with will result in a compile error.
 The above ensures that if a user defines `TORCH_TARGET_VERSION` to be 0x0209000000000000 (2.9) and attempts to use a C shim API `foo` that was introduced in version 2.10, a compilation error will be raised. Similarly, the C++ wrapper APIs in `torch/csrc/stable` are compatible with older libtorch binaries up to the TORCH_ABI_VERSION they are exposed in and forward compatible with newer libtorch binaries.
 
 C++ APIs in ``torch/csrc/stable`` or ``torch/headeronly`` are subject to the same FC/BC policy as the rest of PyTorch (see [policy](https://github.com/pytorch/pytorch/wiki/PyTorch's-Python-Frontend-Backward-and-Forward-Compatibility-Policy)). LibTorch ABI stable C shim APIs are guaranteed to have at least a two year compatibility window.
+
+
+### Concrete Scalars (2.16+)
+
+`torch::stable::Scalar` represents a boolean, signed int64, double, or complex
+double without allocating a native Scalar handle. Construct it from a C++
+value and inspect its type and value through `value()`, a local `std::variant`.
+Unsigned inputs must fit in int64; symbolic Scalars are not supported.
+
+The dispatcher now converts schema `Scalar` (`NumberType`), including optional
+and list forms, in both directions. It preserves the scalar's numeric kind;
+integers are not routed through double. `torch::stable::add(self, other, alpha)`
+and `torch::stable::arange(start, end, step, dtype, layout, device, pin_memory)`
+use this representation and retain the corresponding ATen operator semantics.
+
+Only the wire payload crosses the ABI: an owning `StableListHandle` with three
+`StableIValue` words `(tag, real_bits, imaginary_bits)`. Tags 0, 1, 2, and 3 mean
+bool, int64, double, and complex128. Decoding consumes the list, including when
+validation fails. The variant's C++ layout never crosses the boundary. This
+reuses the existing list ownership mechanism, with a list allocation per boxed
+Scalar; reducing that overhead would require a separate representation decision.

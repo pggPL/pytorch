@@ -21,10 +21,13 @@
 #include <torch/csrc/stable/c/shim.h>
 
 AOTITorchError torch_new_list_reserve_size(size_t size, StableListHandle* ret) {
-  auto list_ptr = std::make_unique<std::vector<StableIValue>>();
-  list_ptr->reserve(size);
-  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(
-      { *ret = list_pointer_to_list_handle(list_ptr.release()); });
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    TORCH_CHECK(ret != nullptr, "ret must not be null");
+    *ret = nullptr;
+    auto list_ptr = std::make_unique<std::vector<StableIValue>>();
+    list_ptr->reserve(size);
+    *ret = list_pointer_to_list_handle(list_ptr.release());
+  });
 }
 
 AOTI_TORCH_EXPORT AOTITorchError
@@ -82,6 +85,32 @@ static StableIValue from_ivalue(
       AtenTensorHandle ath = torch::aot_inductor::new_tensor_handle(
           std::move(const_cast<at::Tensor&>(ivalue.toTensor())));
       return torch::stable::detail::_from(ath, extension_build_version);
+    }
+    case c10::TypeKind::NumberType: {
+      TORCH_CHECK(
+          extension_build_version >= TORCH_VERSION_2_16_0,
+          "Scalar conversion requires extension headers from PyTorch 2.16 or later");
+      const auto scalar = ivalue.toScalar();
+      TORCH_CHECK(
+          !scalar.isSymbolic(),
+          "stable Scalar does not support symbolic values");
+      if (scalar.isBoolean()) {
+        return torch::stable::detail::_from(
+            torch::stable::Scalar(scalar.toBool()), extension_build_version);
+      }
+      if (scalar.isIntegral(false)) {
+        return torch::stable::detail::_from(
+            torch::stable::Scalar(scalar.toLong()), extension_build_version);
+      }
+      if (scalar.isComplex()) {
+        auto value = scalar.toComplexDouble();
+        return torch::stable::detail::_from(
+            torch::stable::Scalar(
+                std::complex<double>(value.real(), value.imag())),
+            extension_build_version);
+      }
+      return torch::stable::detail::_from(
+          torch::stable::Scalar(scalar.toDouble()), extension_build_version);
     }
     case c10::TypeKind::IntType: {
       return torch::stable::detail::_from(
@@ -197,6 +226,24 @@ static c10::IValue to_ivalue(
               torch::stable::detail::_to<AtenTensorHandle>(
                   stable_ivalue, extension_build_version)));
       return c10::IValue(std::move(*tensor));
+    }
+    case c10::TypeKind::NumberType: {
+      TORCH_CHECK(
+          extension_build_version >= TORCH_VERSION_2_16_0,
+          "Scalar conversion requires extension headers from PyTorch 2.16 or later");
+      auto scalar = torch::stable::detail::_to<torch::stable::Scalar>(
+          stable_ivalue, extension_build_version);
+      return std::visit(
+          [](const auto& value) -> c10::IValue {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, std::complex<double>>) {
+              return c10::IValue(
+                  c10::complex<double>(value.real(), value.imag()));
+            } else {
+              return c10::IValue(value);
+            }
+          },
+          scalar.value());
     }
     case c10::TypeKind::IntType: {
       return c10::IValue(torch::stable::detail::_to<int64_t>(
