@@ -279,16 +279,18 @@ C++ APIs in ``torch/csrc/stable`` or ``torch/headeronly`` are subject to the sam
 `torch::stable::get_default_generator(device)` and
 `torch::stable::generator_from_pyobject(obj)` return owning handles sharing the
 original RNG state. The Python conversion requires the GIL and `libtorch_python`.
-`Generator::philox_state(increment)` reserves Philox outputs while holding the
-generator mutex and delegates to `at::Generator::philox_state`.
+`Generator::philox_state(increment)` reserves a per-thread Philox offset range
+while holding the generator mutex and delegates to `at::Generator::philox_state`.
+Choose `increment` for the maximum consumption of a kernel thread; CUDA rounds
+it up to a multiple of four. It is not the total number of output tensor elements.
 
 The result is `(seed, offset, intragraph_offset)`, three one-element int64
 tensors. Interpret their bits as unsigned and consume the pair
 `(seed, offset + intragraph_offset)`. Outside CUDA graph capture all three
 tensors are on CPU. During capture, seed and offset alias GPU buffers updated
 at replay; their contents are undefined until the first replay and are valid
-only for that capture; intragraph_offset is a CPU tensor. Consumers must retain the tensors
-for asynchronous GPU use and graph replay, must not modify the aliased buffers,
+only for that capture; intragraph_offset is a CPU tensor. Consumers must retain
+the tensors for asynchronous GPU use and graph replay, must not modify the aliased buffers,
 and must read replay-dependent values on the device. Initialize the generator
 before capture; PyTorch registers its state on first captured use. CPU generators
 do not support Philox reservation and report an error.

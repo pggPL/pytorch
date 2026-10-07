@@ -351,8 +351,8 @@ AOTI_TORCH_EXPORT AOTITorchError torch_get_default_generator(
 AOTI_TORCH_EXPORT AOTITorchError
 torch_generator_from_pyobject(void* py_obj, AtenGeneratorHandle* ret);
 
-// Reserves increment Philox outputs under the generator's lock. Returns three
-// owning, one-element int64 tensors: seed, offset, intragraph_offset. A kernel
+// Reserves a per-thread Philox offset range under the generator's lock.
+// Returns three owning, one-element int64 tensors: seed, offset, intragraph_offset. A kernel
 // consumes (seed, offset + intragraph_offset), interpreted as uint64 bits.
 // Outside CUDA capture all three are CPU tensors. During capture seed/offset
 // alias device buffers updated at replay; intragraph_offset remains on CPU.
