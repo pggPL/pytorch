@@ -362,6 +362,16 @@ torch_process_group_size(TorchProcessGroupHandle group, int64_t* ret);
 AOTI_TORCH_EXPORT AOTITorchError
 torch_process_group_backend(TorchProcessGroupHandle group, StringHandle* ret);
 
+// Returns a borrowed ncclComm_t as void*. Never initializes a communicator.
+// Keep the group alive; do not destroy/abort/reconfigure it during external
+// use, including GPU completion and graph replay. The caller owns ordering.
+// Errors include unsupported backends and uninitialized communicators;
+// *ret is null on failure. See the stable ABI notes for the full contract.
+AOTI_TORCH_EXPORT AOTITorchError torch_process_group_get_nccl_comm(
+    TorchProcessGroupHandle group,
+    int32_t device_index,
+    void** ret);
+
 // Tensor handles are borrowed; the returned Work owns the group and tensors.
 // Keep Work until completion and call wait to order consumers on the calling
 // stream. All ranks must call collectives in the same order.

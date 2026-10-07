@@ -952,6 +952,8 @@ class TORCH_API ProcessGroupNCCL : public Backend {
 
   int64_t getCommPtr();
 
+  void* getNCCLComm(at::Device device) override;
+
   void groupStart();
 
   void groupEnd();

@@ -82,6 +82,13 @@ class ProcessGroup {
     return detail::to<std::string>(detail::from(result));
   }
 
+  void* nccl_comm(int32_t device_index) const {
+    void* result = nullptr;
+    STABLE_TORCH_ERROR_CODE_CHECK(
+        torch_process_group_get_nccl_comm(group_.get(), device_index, &result));
+    return result;
+  }
+
   Work allreduce(
       const std::vector<Tensor>& tensors,
       ReduceOp op = ReduceOp::SUM) const {

@@ -6,6 +6,7 @@
 #include <torch/csrc/inductor/aoti_torch/utils.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/library.h>
+#include <limits>
 
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
@@ -1024,6 +1025,38 @@ AOTITorchError torch_process_group_backend(
     *ret = nullptr;
     auto name = std::make_unique<std::string>(group->group->getBackendName());
     *ret = reinterpret_cast<StringHandle>(name.release());
+#else
+    TORCH_CHECK(false, "stable c10d requires a PyTorch build with USE_DISTRIBUTED=1");
+#endif
+  });
+}
+
+AOTITorchError torch_process_group_get_nccl_comm(
+    TorchProcessGroupHandle group,
+    int32_t device_index,
+    void** ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    TORCH_CHECK(ret != nullptr, "ret must not be null");
+    *ret = nullptr;
+    TORCH_CHECK(group != nullptr, "group must not be null");
+    TORCH_CHECK(
+        device_index >= 0 &&
+            device_index <= std::numeric_limits<c10::DeviceIndex>::max(),
+        "invalid CUDA device index: ",
+        device_index);
+#ifdef USE_DISTRIBUTED
+    TORCH_CHECK(
+        group->group->hasBackendForDeviceType(c10::DeviceType::CUDA),
+        "process group has no CUDA backend");
+    auto backend = group->group->getBackend(c10::DeviceType::CUDA);
+    auto comm = backend->getNCCLComm(c10::Device(
+        c10::DeviceType::CUDA, static_cast<c10::DeviceIndex>(device_index)));
+    TORCH_CHECK(
+        comm != nullptr,
+        "NCCL communicator is not initialized for CUDA device ",
+        device_index,
+        "; initialize the group on that device before querying, outside CUDA graph capture");
+    *ret = comm;
 #else
     TORCH_CHECK(false, "stable c10d requires a PyTorch build with USE_DISTRIBUTED=1");
 #endif

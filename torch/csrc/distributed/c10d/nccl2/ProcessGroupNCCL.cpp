@@ -718,6 +718,24 @@ int64_t ProcessGroupNCCL::getCommPtr() const {
   return reinterpret_cast<int64_t>(nccl_comm_);
 }
 
+void* ProcessGroupNCCL::getNCCLComm(at::Device device) {
+  TORCH_CHECK(
+      device.is_cuda() && device.has_index(),
+      "expected an indexed CUDA device");
+  c10::cuda::CUDAGuard guard(device);
+  TORCH_CHECK(!shutdown_, "NCCL communicator has been shut down");
+  if (!nccl_comm_) {
+    return nullptr;
+  }
+  TORCH_CHECK(
+      device == device_,
+      "NCCL communicator belongs to ",
+      device_,
+      ", not ",
+      device);
+  return nccl_comm_;
+}
+
 void ProcessGroupNCCL::publishComm() {
   ::c10d::publishNCCLComm(
       getGroupUid(), reinterpret_cast<void*>(nccl_comm_), device_);

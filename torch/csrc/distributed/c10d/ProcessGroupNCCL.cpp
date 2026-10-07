@@ -3358,6 +3358,15 @@ std::shared_ptr<NCCLComm> ProcessGroupNCCL::initNCCLComm(
   return it->second;
 }
 
+void* ProcessGroupNCCL::getNCCLComm(at::Device device) {
+  TORCH_CHECK(
+      device.is_cuda() && device.has_index(),
+      "expected an indexed CUDA device");
+  at::cuda::CUDAGuard guard(device);
+  auto comm = getNCCLComm(getKeyFromDevice(device));
+  return comm ? comm->getNcclComm() : nullptr;
+}
+
 int64_t ProcessGroupNCCL::getCommPtr() {
   // Get the collective communicator on the current CUDA device.
   auto device = at::Device(at::kCUDA, at::cuda::current_device());
