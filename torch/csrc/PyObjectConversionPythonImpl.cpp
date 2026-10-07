@@ -3,6 +3,7 @@
 // so the libtorch-only stable shims (torch_tensor_{from,to}_pyobject) can reach
 // it through torch::detail::getPyObjectConversionImpl().
 
+#include <torch/csrc/Generator.h>
 #include <torch/csrc/PyObjectConversion.h>
 
 #include <torch/csrc/autograd/python_variable.h>
@@ -13,6 +14,17 @@ namespace torch::detail {
 namespace {
 
 struct ConcretePyObjectConversion final : PyObjectConversionInterface {
+  at::Generator generator_from_pyobject(PyObject* obj) const override {
+    TORCH_CHECK(
+        PyGILState_Check(), "torch_generator_from_pyobject requires the GIL");
+    TORCH_CHECK(obj != nullptr, "py_obj must not be null");
+    TORCH_CHECK(
+        PyObject_TypeCheck(
+            obj, reinterpret_cast<PyTypeObject*>(THPGeneratorClass)),
+        "torch_generator_from_pyobject: expected torch.Generator");
+    return THPGenerator_Unwrap(obj);
+  }
+
   at::Tensor tensor_from_pyobject(PyObject* obj) const override {
     // The GIL guards the THPVariable access below; a boxed STABLE_TORCH_LIBRARY
     // kernel may run with the GIL released, so assert rather than race.

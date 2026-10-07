@@ -13,6 +13,7 @@
 #include <ATen/ops/empty_strided.h>
 #include <ATen/ops/from_blob.h>
 #endif // AT_PER_OPERATOR_HEADERS
+#include <ATen/Context.h>
 #include <ATen/Parallel.h>
 #include <c10/util/python_stub.h>
 #include <torch/csrc/PyObjectConversion.h>
@@ -892,4 +893,81 @@ AOTI_TORCH_EXPORT const char* torch_exception_get_what_without_backtrace() {
   return torch::csrc::shim::details ::
       get_torch_exception_what_without_backtrace()
           .c_str();
+}
+
+AOTITorchError torch_get_default_generator(
+    int32_t device_type,
+    int32_t device_index,
+    AtenGeneratorHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    TORCH_CHECK(ret != nullptr, "ret must not be null");
+    *ret = nullptr;
+    TORCH_CHECK(
+        device_type >= 0 &&
+            device_type < static_cast<int32_t>(
+                              c10::DeviceType::COMPILE_TIME_MAX_DEVICE_TYPES),
+        "invalid device type");
+    TORCH_CHECK(
+        device_index >= -1 &&
+            device_index <= std::numeric_limits<c10::DeviceIndex>::max(),
+        "invalid device index");
+    const c10::Device device(
+        static_cast<c10::DeviceType>(device_type),
+        static_cast<c10::DeviceIndex>(device_index));
+    TORCH_CHECK(
+        device.type() != c10::DeviceType::CPU || device_index <= 0,
+        "invalid CPU device index");
+    auto generator = std::make_unique<at::Generator>(
+        at::globalContext().defaultGenerator(device));
+    *ret = torch::aot_inductor::generator_pointer_to_generator_handle(
+        generator.release());
+  });
+}
+
+AOTITorchError torch_generator_from_pyobject(
+    void* py_obj,
+    AtenGeneratorHandle* ret) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    TORCH_CHECK(ret != nullptr, "ret must not be null");
+    *ret = nullptr;
+    auto generator = std::make_unique<at::Generator>(
+        torch::detail::getPyObjectConversionImpl().generator_from_pyobject(
+            static_cast<PyObject*>(py_obj)));
+    *ret = torch::aot_inductor::generator_pointer_to_generator_handle(
+        generator.release());
+  });
+}
+
+AOTITorchError torch_generator_philox_state(
+    AtenGeneratorHandle generator,
+    uint64_t increment,
+    AtenTensorHandle* seed,
+    AtenTensorHandle* offset,
+    AtenTensorHandle* intragraph_offset) {
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    TORCH_CHECK(
+        seed && offset && intragraph_offset, "output slots must not be null");
+    TORCH_CHECK(
+        seed != offset && seed != intragraph_offset &&
+            offset != intragraph_offset,
+        "output slots must be distinct");
+    *seed = *offset = *intragraph_offset = nullptr;
+    TORCH_CHECK(generator != nullptr, "generator must not be null");
+    auto* gen =
+        torch::aot_inductor::generator_handle_to_generator_pointer(generator);
+    auto seed_tensor = std::make_unique<at::Tensor>();
+    auto offset_tensor = std::make_unique<at::Tensor>();
+    auto intragraph_tensor = std::make_unique<at::Tensor>();
+    {
+      std::lock_guard<std::mutex> lock(gen->mutex());
+      std::tie(*seed_tensor, *offset_tensor, *intragraph_tensor) =
+          gen->philox_state(increment);
+    }
+    *seed = torch::aot_inductor::tensor_pointer_to_tensor_handle(
+        seed_tensor.release());
+    *offset = torch::aot_inductor::tensor_pointer_to_tensor_handle(
+        offset_tensor.release());
+    *intragraph_offset = torch::aot_inductor::tensor_pointer_to_tensor_handle(
+        intragraph_tensor.release());
+  });
 }

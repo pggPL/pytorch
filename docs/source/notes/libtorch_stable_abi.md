@@ -191,7 +191,7 @@ You can always work with StableIValue abstractions in your custom kernel for typ
 | ? | ? | at::Scalar | Scalar |
 | std::string/std::string_view | raw bitwise copy of underlying StringHandle into leading bytes of uint64_t | std::string/const char*/ivalue::ConstantString | str |
 | ? | ? | at::Storage | Storage |
-| ? | ? | at::Generator | Generator |
+| torch::stable::Generator | raw bitwise copy of owning AtenGeneratorHandle into leading bytes of uint64_t | at::Generator | Generator |
 | std::vector<T>/torch::headeronly::HeaderOnlyArrayRef<T> | raw bitwise copy into leading bytes of uint64_t of pointer to a new StableIValue pointing to a list of StableIValues recursively representing the underlying elements. | c10::List\<T> | Type[] |
 | ? | ? | ivalue::Tuple\<T> | (Type, ...) |
 | ? | ? | c10::SymInt | SymInt |
@@ -272,3 +272,26 @@ building with will result in a compile error.
 The above ensures that if a user defines `TORCH_TARGET_VERSION` to be 0x0209000000000000 (2.9) and attempts to use a C shim API `foo` that was introduced in version 2.10, a compilation error will be raised. Similarly, the C++ wrapper APIs in `torch/csrc/stable` are compatible with older libtorch binaries up to the TORCH_ABI_VERSION they are exposed in and forward compatible with newer libtorch binaries.
 
 C++ APIs in ``torch/csrc/stable`` or ``torch/headeronly`` are subject to the same FC/BC policy as the rest of PyTorch (see [policy](https://github.com/pytorch/pytorch/wiki/PyTorch's-Python-Frontend-Backward-and-Forward-Compatibility-Policy)). LibTorch ABI stable C shim APIs are guaranteed to have at least a two year compatibility window.
+
+
+### Philox generators (2.16+)
+
+`torch::stable::get_default_generator(device)` and
+`torch::stable::generator_from_pyobject(obj)` return owning handles sharing the
+original RNG state. The Python conversion requires the GIL and `libtorch_python`.
+`Generator::philox_state(increment)` reserves Philox outputs while holding the
+generator mutex and delegates to `at::Generator::philox_state`.
+
+The result is `(seed, offset, intragraph_offset)`, three one-element int64
+tensors. Interpret their bits as unsigned and consume the pair
+`(seed, offset + intragraph_offset)`. Outside CUDA graph capture all three
+tensors are on CPU. During capture, seed and offset alias GPU buffers updated
+at replay; their contents are undefined until the first replay and are valid
+only for that capture; intragraph_offset is a CPU tensor. Consumers must retain the tensors
+for asynchronous GPU use and graph replay, must not modify the aliased buffers,
+and must read replay-dependent values on the device. Initialize the generator
+before capture; PyTorch registers its state on first captured use. CPU generators
+do not support Philox reservation and report an error.
+
+This API has the allocation costs of the tensor-returning native API. It does
+not expose `PhiloxCudaState` or promise the allocation cost of that structure.

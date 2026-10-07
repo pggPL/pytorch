@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ATen/core/Generator.h>
 #include <ATen/core/Tensor.h>
 #include <c10/util/python_stub.h>
 #include <torch/csrc/Export.h>
@@ -31,6 +32,8 @@ namespace torch::detail {
 
 struct TORCH_API PyObjectConversionInterface {
   virtual ~PyObjectConversionInterface() = default;
+
+  virtual at::Generator generator_from_pyobject(PyObject* obj) const = 0;
 
   // Unpack a Python torch.Tensor (PyObject*) into an at::Tensor that shares the
   // underlying TensorImpl. The GIL must be held.

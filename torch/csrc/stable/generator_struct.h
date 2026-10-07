@@ -7,7 +7,9 @@
 #include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#include <torch/csrc/stable/tensor_struct.h>
 #include <memory>
+#include <tuple>
 
 HIDDEN_NAMESPACE_BEGIN(torch, stable)
 
@@ -81,6 +83,11 @@ class Generator {
    * Minimum compatible version: PyTorch 2.13.
    */
   Device device() const;
+
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+  // See torch_generator_philox_state for capture and lifetime semantics.
+  std::tuple<Tensor, Tensor, Tensor> philox_state(uint64_t increment) const;
+#endif
 };
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0

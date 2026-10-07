@@ -338,6 +338,35 @@ AOTI_TORCH_EXPORT AOTITorchError torch_tensor_to_pyobject(
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_14_0
 
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
+// Returns an owning handle sharing the default generator's state. Initialize
+// the device before capture. Device type uses aoti_torch_device_type_* values.
+AOTI_TORCH_EXPORT AOTITorchError torch_get_default_generator(
+    int32_t device_type,
+    int32_t device_index,
+    AtenGeneratorHandle* ret);
+
+// The GIL must be held. Returns an owning handle sharing the Python generator.
+AOTI_TORCH_EXPORT AOTITorchError
+torch_generator_from_pyobject(void* py_obj, AtenGeneratorHandle* ret);
+
+// Reserves increment Philox outputs under the generator's lock. Returns three
+// owning, one-element int64 tensors: seed, offset, intragraph_offset. A kernel
+// consumes (seed, offset + intragraph_offset), interpreted as uint64 bits.
+// Outside CUDA capture all three are CPU tensors. During capture seed/offset
+// alias device buffers updated at replay; intragraph_offset remains on CPU.
+// Retain the tensors for asynchronous consumers and graph replay. Unsupported
+// generators return an error. Output slots must be distinct and non-null.
+AOTI_TORCH_EXPORT AOTITorchError torch_generator_philox_state(
+    AtenGeneratorHandle generator,
+    uint64_t increment,
+    AtenTensorHandle* seed,
+    AtenTensorHandle* offset,
+    AtenTensorHandle* intragraph_offset);
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

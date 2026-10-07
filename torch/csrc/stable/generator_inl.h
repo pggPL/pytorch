@@ -27,4 +27,39 @@ inline Device Generator::device() const {
 
 #endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_13_0
 
+#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
+inline std::tuple<Tensor, Tensor, Tensor> Generator::philox_state(
+    uint64_t increment) const {
+  AtenTensorHandle seed = nullptr, offset = nullptr, intragraph = nullptr;
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_generator_philox_state(
+      get(), increment, &seed, &offset, &intragraph));
+  using Handle = std::
+      unique_ptr<AtenTensorOpaque, decltype(&aoti_torch_delete_tensor_object)>;
+  Handle seed_guard(seed, aoti_torch_delete_tensor_object);
+  Handle offset_guard(offset, aoti_torch_delete_tensor_object);
+  Handle intragraph_guard(intragraph, aoti_torch_delete_tensor_object);
+  return {
+      Tensor(seed_guard.release()),
+      Tensor(offset_guard.release()),
+      Tensor(intragraph_guard.release())};
+}
+
+inline Generator get_default_generator(Device device) {
+  AtenGeneratorHandle ret = nullptr;
+  auto type = detail::to<int32_t>(detail::from(device.type()));
+  STABLE_TORCH_ERROR_CODE_CHECK(
+      torch_get_default_generator(type, device.index(), &ret));
+  return Generator(ret);
+}
+
+// Requires the GIL and a loaded libtorch_python.
+inline Generator generator_from_pyobject(void* obj) {
+  AtenGeneratorHandle ret = nullptr;
+  STABLE_TORCH_ERROR_CODE_CHECK(torch_generator_from_pyobject(obj, &ret));
+  return Generator(ret);
+}
+
+#endif // TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
+
 HIDDEN_NAMESPACE_END(torch, stable)
