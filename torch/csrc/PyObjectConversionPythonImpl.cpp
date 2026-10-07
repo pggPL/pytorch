@@ -7,12 +7,30 @@
 
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch/csrc/python_headers.h>
+#ifdef USE_DISTRIBUTED
+#include <torch/csrc/utils/pybind.h>
+#endif
 
 namespace torch::detail {
 
 namespace {
 
 struct ConcretePyObjectConversion final : PyObjectConversionInterface {
+#ifdef USE_DISTRIBUTED
+  c10::intrusive_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+      PyObject* obj) const override {
+    TORCH_CHECK(
+        PyGILState_Check(),
+        "torch_process_group_from_pyobject requires the GIL");
+    TORCH_CHECK(obj != nullptr, "py_obj must not be null");
+    TORCH_CHECK(
+        pybind11::isinstance<c10d::ProcessGroup>(pybind11::handle(obj)),
+        "torch_process_group_from_pyobject: expected ProcessGroup");
+    return pybind11::cast<c10::intrusive_ptr<c10d::ProcessGroup>>(
+        pybind11::handle(obj));
+  }
+#endif
+
   at::Tensor tensor_from_pyobject(PyObject* obj) const override {
     // The GIL guards the THPVariable access below; a boxed STABLE_TORCH_LIBRARY
     // kernel may run with the GIL released, so assert rather than race.

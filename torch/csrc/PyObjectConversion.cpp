@@ -16,6 +16,13 @@ constexpr const char* kNoImplMsg =
 // Mirrors NoopPyInterpreterVTable: calling a method is a hard error rather than
 // silent misbehavior.
 struct NoopPyObjectConversion final : PyObjectConversionInterface {
+#ifdef USE_DISTRIBUTED
+  c10::intrusive_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+      PyObject* /*obj*/) const override {
+    TORCH_CHECK(
+        false, "torch_process_group_from_pyobject requires libtorch_python");
+  }
+#endif
   at::Tensor tensor_from_pyobject(PyObject* /*obj*/) const override {
     TORCH_CHECK(false, kNoImplMsg);
   }
