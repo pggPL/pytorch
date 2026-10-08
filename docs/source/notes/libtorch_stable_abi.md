@@ -31,6 +31,7 @@ It consists of
 - torch/csrc/stable/accelerator.h: Provides a stable interface for device-generic objects and APIs
 (e.g. `getCurrentStream`, `DeviceGuard`).
 - torch/csrc/stable/pyobject.h: Provides conversions between Python objects and their `torch::stable` equivalents, such as `tensor_from_pyobject` / `tensor_to_pyobject` for a Python `torch.Tensor`. To access these APIs, you still need to only link `libtorch`, but `libtorch_python` must be loaded at runtime; see the Python interop shims section below.
+- torch/csrc/stable/c10d.h (2.16+): Provides owning process group and collective work wrappers. See [Process groups and collective work](https://docs.pytorch.org/cppdocs/api/stable/distributed.html) for usage and synchronization requirements.
 
 We are continuing to improve coverage in our `torch/csrc/stable` APIs. Please file an issue if you'd like to see support for particular APIs in your custom extension.
 
@@ -272,35 +273,3 @@ building with will result in a compile error.
 The above ensures that if a user defines `TORCH_TARGET_VERSION` to be 0x0209000000000000 (2.9) and attempts to use a C shim API `foo` that was introduced in version 2.10, a compilation error will be raised. Similarly, the C++ wrapper APIs in `torch/csrc/stable` are compatible with older libtorch binaries up to the TORCH_ABI_VERSION they are exposed in and forward compatible with newer libtorch binaries.
 
 C++ APIs in ``torch/csrc/stable`` or ``torch/headeronly`` are subject to the same FC/BC policy as the rest of PyTorch (see [policy](https://github.com/pytorch/pytorch/wiki/PyTorch's-Python-Frontend-Backward-and-Forward-Compatibility-Policy)). LibTorch ABI stable C shim APIs are guaranteed to have at least a two year compatibility window.
-
-
-### Process groups and collective work (2.16+)
-
-`torch::stable::c10d::ProcessGroup::from_pyobject(obj)` acquires an owning
-reference to an existing Python ProcessGroup, preserving Python overrides.
-The conversion requires the GIL and `libtorch_python`. Other calls do not
-require the caller to hold the GIL; callbacks and ownership release acquire it
-as needed. Copies of the stable wrapper share ownership. Release all handles
-before Python interpreter shutdown. Group creation, registration, and destruction
-remain with the caller's distributed setup.
-
-The wrapper exposes rank, size, backend name, allreduce, allreduce_coalesced,
-broadcast, single-input allgather, and barrier. Reductions include SUM, AVG,
-PRODUCT, MIN, MAX, BAND, BOR, and BXOR; backend support is unchanged. All ranks
-must issue matching collectives in matching order. Allgather takes one output
-per rank, and broadcast roots are ranks within this group.
-
-Each operation returns an owning `Work`, which retains the native operation,
-group, and tensor objects. Keep it until the operation completes. `wait()`
-delegates to the backend: for CUDA it establishes dependencies on the calling
-stream and need not block the CPU until GPU completion. Polling
-`is_completed()` does not establish ordering on a different CUDA stream.
-`wait(timeout_ms)` propagates backend errors and returns false on an aborted
-operation; zero selects the backend default. Dropping Work neither waits nor
-cancels. Ownership does not protect against explicit group destruction or
-external mutation/freeing of tensor storage. Consumers must retain external
-buffers and follow their backend's stream and graph lifetime requirements.
-
-The C entry points are exported even without distributed support and report a
-clear error in that configuration. This API does not expose native NCCL
-communicators, symmetric-memory windows, or arbitrary TorchBind objects.
