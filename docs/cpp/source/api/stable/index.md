@@ -65,7 +65,6 @@ For more information on the stable ABI, see the
 registration
 operators
 utilities
-distributed
 ```
 
 ## See Also

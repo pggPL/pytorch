@@ -13,6 +13,7 @@ HIDDEN_NAMESPACE_BEGIN(torch, stable, c10d)
 
 #if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_16_0
 
+/** Reduction operations; support depends on the process group's backend. */
 enum class ReduceOp : int32_t {
   SUM = 0,
   AVG = 1,
@@ -24,11 +25,29 @@ enum class ReduceOp : int32_t {
   BXOR = 7
 };
 
+/**
+ * Owns a collective operation and retains its group and tensor objects.
+ * Copies share ownership. Keep a Work until completion; destruction neither
+ * waits nor cancels. Release all handles before Python interpreter shutdown.
+ * Calls and destruction acquire the GIL as needed.
+ *
+ * Ownership does not prevent explicit group destruction or mutation/freeing of
+ * tensor storage. Retain external buffers and follow backend stream and graph
+ * lifetime requirements.
+ */
 class Work {
  public:
+  /** Takes ownership of the handle. */
   explicit Work(TorchWorkHandle work)
       : work_(work, [](TorchWorkHandle value) { torch_delete_work(value); }) {}
 
+  /**
+   * Delegates to the backend, returning its boolean result and propagating
+   * errors. Zero timeout selects the backend default. On CUDA, establishes
+   * dependencies on the calling stream without necessarily blocking the CPU
+   * until completion. Other streams need their own dependencies; a successful
+   * wait alone does not make it safe to release externally managed resources.
+   */
   bool wait(int64_t timeout_ms = 0) const {
     bool result = false;
     STABLE_TORCH_ERROR_CODE_CHECK(
@@ -36,6 +55,8 @@ class Work {
     return result;
   }
 
+  /** Queries backend completion without establishing CUDA stream dependencies.
+   */
   bool is_completed() const {
     bool result = false;
     STABLE_TORCH_ERROR_CODE_CHECK(
@@ -47,13 +68,27 @@ class Work {
   std::shared_ptr<TorchWorkOpaque> work_;
 };
 
+/**
+ * Owns a reference to an existing process group; copies share ownership.
+ * Group creation, registration, and explicit destruction remain with the
+ * caller. Release all handles before Python interpreter shutdown. Except for
+ * from_pyobject(), calls and destruction acquire the GIL as needed.
+ *
+ * All ranks must issue matching collectives in matching order. Calls report an
+ * error if PyTorch was built without distributed support.
+ */
 class ProcessGroup {
  public:
+  /** Takes ownership of the handle. */
   explicit ProcessGroup(TorchProcessGroupHandle group)
       : group_(group, [](TorchProcessGroupHandle value) {
           torch_delete_process_group(value);
         }) {}
 
+  /**
+   * Retains the Python ProcessGroup, preserving Python overrides.
+   * The caller must hold the GIL and have libtorch_python loaded at runtime.
+   */
   static ProcessGroup from_pyobject(void* obj) {
     TorchProcessGroupHandle result = nullptr;
     STABLE_TORCH_ERROR_CODE_CHECK(
@@ -110,6 +145,8 @@ class ProcessGroup {
     return Work(result);
   }
 
+  /** The root rank is relative to this group; root_tensor indexes its tensors.
+   */
   Work broadcast(
       const std::vector<Tensor>& tensors,
       int64_t root_rank,
@@ -126,6 +163,8 @@ class ProcessGroup {
     return Work(result);
   }
 
+  /** Gathers one input per rank into outputs, which must contain one per rank.
+   */
   Work allgather(const Tensor& input, const std::vector<Tensor>& outputs)
       const {
     auto handles = tensor_handles(outputs);
