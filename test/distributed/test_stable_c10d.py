@@ -1,142 +1,47 @@
 # Owner(s): ["oncall: distributed"]
 
-import ctypes
 import gc
 import os
 import sys
+import sysconfig
 import tempfile
 import threading
 import unittest
 import weakref
 from datetime import timedelta
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import (
-    find_library_location,
+    install_cpp_extension,
     instantiate_parametrized_tests,
-    IS_WINDOWS,
     parametrize,
     run_tests,
     TestCase,
 )
 
 
-class StableC10d:
-    def __init__(self, group):
-        library = (
-            str(find_library_location("torch_cpu.dll"))
-            if IS_WINDOWS
-            else torch._C.__file__
+def setUpModule():
+    if not dist.is_available():
+        raise unittest.SkipTest("requires distributed support")
+    if sysconfig.get_config_var("Py_GIL_DISABLED") == 1:
+        raise unittest.SkipTest("requires CPython limited API")
+    try:
+        from libtorch_agn_2_16 import _c10d  # noqa: F401
+    except ImportError:
+        install_cpp_extension(
+            Path(__file__).resolve().parents[1]
+            / "cpp_extensions"
+            / "libtorch_agn_2_16_extension"
         )
-        self.lib = ctypes.CDLL(library)
-        self.py = ctypes.PyDLL(library)
-        handle = ctypes.c_void_p
-        output = ctypes.POINTER(handle)
-        tensor_array = ctypes.POINTER(handle)
-        signatures = {
-            "torch_process_group_from_pyobject": [ctypes.py_object, output],
-            "torch_tensor_from_pyobject": [ctypes.py_object, output],
-            "torch_process_group_rank": [handle, ctypes.POINTER(ctypes.c_int64)],
-            "torch_process_group_size": [handle, ctypes.POINTER(ctypes.c_int64)],
-            "torch_process_group_backend": [handle, output],
-            "torch_string_c_str": [handle, ctypes.POINTER(ctypes.c_char_p)],
-            "torch_delete_string": [handle],
-            "torch_process_group_allreduce": [
-                handle,
-                tensor_array,
-                ctypes.c_size_t,
-                ctypes.c_int32,
-                output,
-            ],
-            "torch_process_group_allreduce_coalesced": [
-                handle,
-                tensor_array,
-                ctypes.c_size_t,
-                ctypes.c_int32,
-                output,
-            ],
-            "torch_process_group_broadcast": [
-                handle,
-                tensor_array,
-                ctypes.c_size_t,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                output,
-            ],
-            "torch_process_group_allgather": [
-                handle,
-                handle,
-                tensor_array,
-                ctypes.c_size_t,
-                output,
-            ],
-            "torch_process_group_barrier": [
-                handle,
-                ctypes.POINTER(ctypes.c_int64),
-                ctypes.c_size_t,
-                output,
-            ],
-            "torch_work_wait": [handle, ctypes.c_int64, ctypes.POINTER(ctypes.c_bool)],
-            "torch_work_is_completed": [handle, ctypes.POINTER(ctypes.c_bool)],
-            "torch_delete_work": [handle],
-            "torch_delete_process_group": [handle],
-            "aoti_torch_delete_tensor_object": [handle],
-        }
-        for library in (self.lib, self.py):
-            for name, args in signatures.items():
-                fn = getattr(library, name)
-                fn.argtypes = args
-                fn.restype = ctypes.c_int
-            library.torch_exception_get_what.restype = ctypes.c_char_p
-        self.group = handle()
-        self.check(
-            self.py.torch_process_group_from_pyobject(group, ctypes.byref(self.group))
-        )
-
-    def check(self, result):
-        if result:
-            raise RuntimeError(self.lib.torch_exception_get_what().decode())
-
-    def close(self):
-        self.check(self.lib.torch_delete_process_group(self.group))
-        self.group = None
-
-    def tensors(self, tensors):
-        handles = (ctypes.c_void_p * len(tensors))()
-        for index, tensor in enumerate(tensors):
-            out = ctypes.c_void_p()
-            self.check(self.py.torch_tensor_from_pyobject(tensor, ctypes.byref(out)))
-            handles[index] = out
-        return handles
-
-    def launch(self, name, tensors, *args):
-        handles = self.tensors(tensors)
-        work = ctypes.c_void_p()
-        try:
-            fn = getattr(self.lib, "torch_process_group_" + name)
-            self.check(fn(self.group, handles, len(handles), *args, ctypes.byref(work)))
-        finally:
-            for handle in handles:
-                self.check(self.lib.aoti_torch_delete_tensor_object(handle))
-        return work
-
-    def wait(self, work):
-        done = ctypes.c_bool()
-        try:
-            self.check(self.lib.torch_work_wait(work, 30000, ctypes.byref(done)))
-            if not done.value:
-                raise RuntimeError("collective was aborted")
-            self.check(self.lib.torch_work_is_completed(work, ctypes.byref(done)))
-            if not done.value:
-                raise RuntimeError("Gloo work is incomplete after wait")
-        finally:
-            self.check(self.lib.torch_delete_work(work))
 
 
 def run_rank(rank, rendezvous):
+    from libtorch_agn_2_16 import _c10d as api
+
     dist.init_process_group(
         "gloo",
         init_method="file://" + rendezvous,
@@ -146,90 +51,62 @@ def run_rank(rank, rendezvous):
     )
     case = TestCase()
     pg = dist.new_group([0, 1], backend="gloo", timeout=timedelta(seconds=45))
-    api = StableC10d(pg)
+    group = api.process_group(pg)
+
+    def wait(work):
+        try:
+            case.assertTrue(api.wait(work, 30000))
+            case.assertTrue(api.is_completed(work))
+        finally:
+            api.close_work(work)
+
     try:
-        for name, expected in (("rank", rank), ("size", 2)):
-            value = ctypes.c_int64()
-            api.check(
-                getattr(api.lib, "torch_process_group_" + name)(
-                    api.group, ctypes.byref(value)
-                )
-            )
-            case.assertEqual(value.value, expected)
-        backend = ctypes.c_void_p()
-        api.check(api.lib.torch_process_group_backend(api.group, ctypes.byref(backend)))
-        name = ctypes.c_char_p()
-        api.check(api.lib.torch_string_c_str(backend, ctypes.byref(name)))
-        case.assertEqual(name.value, b"gloo")
-        api.check(api.lib.torch_delete_string(backend))
+        case.assertEqual(api.group_info(group), (rank, 2, "gloo"))
         with case.assertRaisesRegex(RuntimeError, "expected ProcessGroup"):
-            StableC10d(None)
+            api.process_group(None)
         single_group = dist.new_group(
             [0], backend="gloo", timeout=timedelta(seconds=45)
         )
         if rank == 0:
-            single = StableC10d(single_group)
+            single = api.process_group(single_group)
             try:
-                size = ctypes.c_int64()
-                single.check(
-                    single.lib.torch_process_group_size(
-                        single.group, ctypes.byref(size)
-                    )
-                )
-                case.assertEqual(size.value, 1)
+                case.assertEqual(api.group_info(single), (0, 1, "gloo"))
                 only = torch.full((2,), 11.0)
-                single.wait(single.launch("allreduce", [only], 0))
+                wait(api.allreduce(single, [only]))
                 case.assertEqual(only, torch.full((2,), 11.0))
             finally:
-                single.close()
+                api.close_group(single)
                 dist.destroy_process_group(single_group)
         value = torch.full((4,), float(rank + 1))
-        api.wait(api.launch("allreduce", [value], 0))
+        wait(api.allreduce(group, [value]))
         case.assertEqual(value, torch.full((4,), 3.0))
         tensors = [torch.full((2,), float(rank)), torch.full((3,), float(3 - rank))]
-        api.wait(api.launch("allreduce_coalesced", tensors, 4))
+        wait(api.allreduce_coalesced(group, tensors, 4))
         case.assertEqual(tensors, [torch.ones(2), torch.full((3,), 3.0)])
         value.fill_(rank + 7)
-        api.wait(api.launch("broadcast", [value], 1, 0))
+        wait(api.broadcast(group, [value], 1))
         case.assertEqual(value, torch.full((4,), 8.0))
         with case.assertRaisesRegex(RuntimeError, "invalid root rank"):
-            api.launch("broadcast", [value], 2, 0)
+            api.broadcast(group, [value], 2)
         with case.assertRaisesRegex(RuntimeError, "invalid stable reduction"):
-            api.launch("allreduce", [value], 99)
+            api.allreduce(group, [value], 99)
         with case.assertRaisesRegex(RuntimeError, "nonempty"):
-            api.launch("allreduce", [], 0)
+            api.allreduce(group, [])
         outputs = [torch.empty(2), torch.empty(2)]
         inp = torch.full((2,), float(rank))
-        ins = api.tensors([inp])
-        outs = api.tensors(outputs)
-        work = ctypes.c_void_p()
-        try:
-            api.check(
-                api.lib.torch_process_group_allgather(
-                    api.group, ins[0], outs, 2, ctypes.byref(work)
-                )
-            )
-        finally:
-            for handle in [*ins, *outs]:
-                api.check(api.lib.aoti_torch_delete_tensor_object(handle))
-        api.wait(work)
+        wait(api.allgather(group, inp, outputs))
         case.assertEqual(outputs, [torch.zeros(2), torch.ones(2)])
-        work = ctypes.c_void_p()
-        api.check(
-            api.lib.torch_process_group_barrier(api.group, None, 0, ctypes.byref(work))
-        )
-        api.wait(work)
+        wait(api.barrier(group))
         value.fill_(rank + 1)
-        work = api.launch("allreduce", [value], 0)
-        # Work keeps native group/tensor references after releasing stable handles.
-        api.close()
+        work = api.allreduce(group, [value])
+        # Work keeps native group/tensor references after releasing stable wrappers.
+        api.close_group(group)
         del pg
         gc.collect()
-        api.wait(work)
+        wait(work)
         case.assertEqual(value, torch.full((4,), 3.0))
     finally:
-        if api.group:
-            api.close()
+        api.close_group(group)
         dist.destroy_process_group()
 
 
@@ -239,6 +116,8 @@ class TestStableC10d(TestCase):
     @parametrize("last_owner", ["group", "work"])
     @parametrize("gil_held", [False, True])
     def test_python_group_lifetime(self, last_owner, gil_held):
+        from libtorch_agn_2_16 import _c10d as api
+
         class PythonWork(dist.Work):
             def __init__(self, group):
                 super().__init__()
@@ -259,36 +138,32 @@ class TestStableC10d(TestCase):
 
         group = PythonGroup()
         group_ref = weakref.ref(group)
-        api = StableC10d(group)
+        original = api.process_group(group)
+        handle = api.copy_group(original)
+        api.close_group(original, gil_held)
         work = None
         try:
             del group
             gc.collect()
             self.assertIsNotNone(group_ref())
-            rank = ctypes.c_int64()
-            api.check(api.lib.torch_process_group_rank(api.group, ctypes.byref(rank)))
-            self.assertEqual(rank.value, 7)
-            library = api.py if gil_held else api.lib
+            self.assertEqual(api.group_info(handle)[:2], (7, 1))
             if last_owner == "work":
-                work = api.launch("allreduce", [torch.ones(1)], 0)
-                api.close()
+                original_work = api.allreduce(handle, [torch.ones(1)])
+                work = api.copy_work(original_work)
+                api.close_work(original_work, gil_held)
+                api.close_group(handle, gil_held)
                 gc.collect()
                 self.assertIsNotNone(group_ref())
-                done = ctypes.c_bool()
-                api.check(library.torch_work_wait(work, 0, ctypes.byref(done)))
-                self.assertTrue(done.value)
-                api.check(library.torch_delete_work(work))
-                work = None
+                self.assertTrue(api.wait(work, 0, gil_held))
+                api.close_work(work, gil_held)
             else:
-                api.check(library.torch_delete_process_group(api.group))
-                api.group = None
+                api.close_group(handle, gil_held)
             gc.collect()
             self.assertIsNone(group_ref())
         finally:
             if work is not None:
-                api.check(api.lib.torch_delete_work(work))
-            if api.group:
-                api.close()
+                api.close_work(work)
+            api.close_group(handle)
 
     def test_two_rank_collectives(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,6 +173,8 @@ class TestStableC10d(TestCase):
 
 
 def run_final_owner_delete(device, last_owner):
+    from libtorch_agn_2_16 import _c10d as api
+
     torch.cuda.set_device(device)
     store = dist.HashStore()
     backend = dist.ProcessGroupNCCL(store, 0, 1)
@@ -319,32 +196,29 @@ def run_final_owner_delete(device, last_owner):
         finished.set()
 
     group._register_on_completion_hook(hook)
-    api = StableC10d(group)
-    work = api.launch("allreduce", [value], 0)
-    done = ctypes.c_bool()
-    api.check(api.lib.torch_work_wait(work, 0, ctypes.byref(done)))
+    handle = api.process_group(group)
+    work = api.allreduce(handle, [value])
+    if not api.wait(work):
+        raise AssertionError("collective was aborted")
     torch.cuda.synchronize(device)
     if not entered.wait(timeout=10):
         raise AssertionError("completion hook was not entered")
     del group
     gc.collect()
     if last_owner == "group":
-        api.check(api.lib.torch_delete_work(work))
+        api.close_work(work)
+        close, last = api.close_group, handle
     else:
-        api.close()
-    if last_owner == "group":
-        delete, handle = api.py.torch_delete_process_group, api.group
-    else:
-        delete, handle = api.py.torch_delete_work, work
+        api.close_group(handle)
+        close, last = api.close_work, work
     interval = sys.getswitchinterval()
     try:
-        # The hook must acquire the GIL during deletion, not before the call.
+        # The hook must acquire the GIL during destruction, not before the call.
         sys.setswitchinterval(120)
         blocker.set()
-        result = delete(handle)
+        close(last, True)
     finally:
         sys.setswitchinterval(interval)
-    api.check(result)
     if not finished.is_set():
         raise AssertionError("group destruction did not finish the hook")
     parent.shutdown()
@@ -352,15 +226,6 @@ def run_final_owner_delete(device, last_owner):
 
 @unittest.skipUnless(dist.is_available() and dist.is_nccl_available(), "requires NCCL")
 class TestStableC10dNCCL(TestCase):
-    def make_group(self, backend_name, device):
-        store = dist.HashStore()
-        backend = getattr(dist, backend_name)(store, 0, 1)
-        group = dist.ProcessGroup(store, 0, 1)
-        group._register_backend(
-            torch.device(device), dist.ProcessGroup.BackendType.NCCL, backend
-        )
-        return group, backend, StableC10d(group)
-
     @parametrize("last_owner", ["group", "work"])
     def test_final_owner_with_gil(self, device, last_owner):
         process = mp.get_context("spawn").Process(
@@ -381,7 +246,15 @@ class TestStableC10dNCCL(TestCase):
         ["ProcessGroupNCCL", "ProcessGroupNCCL2", "ProcessGroupNCCLLazy"],
     )
     def test_collective_cuda_graph(self, device, backend_name):
-        group, backend, api = self.make_group(backend_name, device)
+        from libtorch_agn_2_16 import _c10d as api
+
+        store = dist.HashStore()
+        backend = getattr(dist, backend_name)(store, 0, 1)
+        group = dist.ProcessGroup(store, 0, 1)
+        group._register_backend(
+            torch.device(device), dist.ProcessGroup.BackendType.NCCL, backend
+        )
+        handle = api.process_group(group)
         graph = None
         work = None
         try:
@@ -391,11 +264,9 @@ class TestStableC10dNCCL(TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 value.add_(1)
-                work = api.launch("allreduce", [value], 0)
-                done = ctypes.c_bool()
-                api.check(api.lib.torch_work_wait(work, 0, ctypes.byref(done)))
-                self.assertTrue(done.value)
-            # Only the stable group and Work handles retain ownership during replay.
+                work = api.allreduce(handle, [value])
+                self.assertTrue(api.wait(work))
+            # Only the stable ProcessGroup and Work retain ownership during replay.
             del group, backend
             gc.collect()
             for expected in (1, 2, 3):
@@ -407,8 +278,8 @@ class TestStableC10dNCCL(TestCase):
             if graph is not None:
                 graph.reset()
             if work is not None:
-                api.check(api.lib.torch_delete_work(work))
-            api.close()
+                api.close_work(work)
+            api.close_group(handle)
 
 
 instantiate_device_type_tests(TestStableC10dNCCL, globals(), only_for="cuda")
