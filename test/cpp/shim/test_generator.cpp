@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 #include <torch/csrc/inductor/aoti_torch/utils.h>
 #include <torch/csrc/stable/generator.h>
+#include <torch/csrc/stable/tensor.h>
 
 TEST(TorchStableGenerator, DefaultSharesState) {
   auto stable = torch::stable::get_default_generator(
@@ -12,6 +13,34 @@ TEST(TorchStableGenerator, DefaultSharesState) {
   auto copy = stable;
   EXPECT_EQ(copy.get(), stable.get());
   EXPECT_EQ(copy.device().type(), torch::stable::DeviceType::CPU);
+}
+
+TEST(TorchStableGenerator, PhiloxStateOwnsTensors) {
+  if (!at::hasCUDA() || at::getNumGPUs() == 0) {
+    GTEST_SKIP() << "requires CUDA";
+  }
+  const auto [first, second] = [] {
+    auto gen = torch::stable::get_default_generator(
+        torch::stable::Device(torch::stable::DeviceType::CUDA, 0));
+    auto first = gen.philox_state(5);
+    auto second = gen.philox_state(4);
+    return std::make_pair(std::move(first), std::move(second));
+  }();
+  for (const auto* state : {&first, &second}) {
+    const auto& [seed, offset, intra] = *state;
+    for (const auto* tensor : {&seed, &offset, &intra}) {
+      ASSERT_EQ(tensor->device().type(), torch::stable::DeviceType::CPU);
+      ASSERT_EQ(tensor->scalar_type(), torch::stable::ScalarType::Long);
+      ASSERT_EQ(tensor->numel(), 1);
+    }
+    EXPECT_EQ(*intra.const_data_ptr<int64_t>(), 0);
+  }
+  EXPECT_EQ(
+      *std::get<0>(first).const_data_ptr<int64_t>(),
+      *std::get<0>(second).const_data_ptr<int64_t>());
+  EXPECT_EQ(
+      *std::get<1>(second).const_data_ptr<int64_t>(),
+      *std::get<1>(first).const_data_ptr<int64_t>() + 8);
 }
 
 TEST(TorchStableGenerator, UnsupportedBackendAndInvalidArguments) {

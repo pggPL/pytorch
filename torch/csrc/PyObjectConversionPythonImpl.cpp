@@ -22,7 +22,7 @@ struct ConcretePyObjectConversion final : PyObjectConversionInterface {
         PyObject_TypeCheck(
             obj, reinterpret_cast<PyTypeObject*>(THPGeneratorClass)),
         "torch_generator_from_pyobject: expected torch.Generator");
-    return THPGenerator_Unwrap(obj);
+    return reinterpret_cast<THPGenerator*>(obj)->cdata;
   }
 
   at::Tensor tensor_from_pyobject(PyObject* obj) const override {

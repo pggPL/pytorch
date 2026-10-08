@@ -6,14 +6,27 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
-from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.testing._internal.common_utils import (
+    find_library_location,
+    instantiate_parametrized_tests,
+    IS_WINDOWS,
+    parametrize,
+    run_tests,
+    TestCase,
+)
 
 
+@instantiate_parametrized_tests
 class TestStablePhilox(TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.lib = ctypes.PyDLL(torch._C.__file__)
+        library = (
+            str(find_library_location("torch_cpu.dll"))
+            if IS_WINDOWS
+            else torch._C.__file__
+        )
+        cls.lib = ctypes.PyDLL(library)
         handle = ctypes.c_void_p
         output = ctypes.POINTER(handle)
         signatures = {
@@ -34,7 +47,7 @@ class TestStablePhilox(TestCase):
             fn = getattr(cls.lib, name)
             fn.argtypes = args
             fn.restype = ctypes.c_int
-        cls.reserve_fn = ctypes.CDLL(torch._C.__file__).torch_generator_philox_state
+        cls.reserve_fn = ctypes.CDLL(library).torch_generator_philox_state
         cls.reserve_fn.argtypes = signatures["torch_generator_philox_state"]
         cls.reserve_fn.restype = ctypes.c_int
         cls.lib.torch_exception_get_what.restype = ctypes.c_char_p
@@ -76,6 +89,21 @@ class TestStablePhilox(TestCase):
                 self.generator(obj)
         with self.assertRaisesRegex(RuntimeError, "philox_state"):
             self.reserve(self.generator(torch.Generator()), 4)
+
+    @parametrize("device", ("cpu", "cuda"))
+    def test_generator_subclass(self, device):
+        if device == "cuda" and not torch.cuda.is_available():
+            self.skipTest("requires CUDA")
+
+        class CustomGenerator(torch.Generator):
+            pass
+
+        gen = CustomGenerator(device=device).manual_seed(123)
+        handle = self.generator(gen)
+        self.assertIsNotNone(handle.value)
+        if device == "cuda":
+            self.assertEqual([t.item() for t in self.reserve(handle, 5)], [123, 0, 0])
+            self.assertEqual(gen.get_offset(), 8)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_seed_offset_and_shared_state(self):
@@ -131,22 +159,30 @@ class TestStablePhilox(TestCase):
         graphs = []
         for _ in range(2):
             graph = torch.cuda.CUDAGraph()
+            states = []
+            results = []
             with torch.cuda.graph(graph, stream=stream):
-                seed, offset, intra = self.reserve(handle, 4)
-                result = seed + offset + intra.item()
-            self.assertEqual(seed.device.type, "cuda")
-            self.assertEqual(offset.device.type, "cuda")
-            self.assertEqual(intra.device.type, "cpu")
-            graphs.append((graph, result))
-        del gen, seed, offset, intra
+                for increment in (5, 4):
+                    seed, offset, intra = self.reserve(handle, increment)
+                    states.append((seed, offset, intra))
+                    results.append(seed + offset + intra.item())
+            for seed, offset, intra in states:
+                self.assertEqual(seed.device.type, "cuda")
+                self.assertEqual(offset.device.type, "cuda")
+                self.assertEqual(intra.device.type, "cpu")
+            self.assertEqual([intra.item() for _, _, intra in states], [0, 8])
+            graphs.append((graph, results))
+        del gen, states, seed, offset, intra
         gc.collect()
         expected = 123
         for _ in range(3):
-            for graph, result in graphs:
+            for graph, results in graphs:
                 graph.replay()
                 torch.cuda.synchronize()
-                self.assertEqual(result.item(), expected)
-                expected += 4
+                self.assertEqual(
+                    [result.item() for result in results], [expected, expected + 8]
+                )
+                expected += 12
 
 
 if __name__ == "__main__":
