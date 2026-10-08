@@ -3,6 +3,10 @@
 #include <ATen/core/Tensor.h>
 #include <c10/util/python_stub.h>
 #include <torch/csrc/Export.h>
+#include <memory>
+#ifdef USE_DISTRIBUTED
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#endif
 
 // Indirection that lets the libtorch-only Python-interop stable shims call into
 // code that only libtorch_python can provide (THPVariable_* &co) without
@@ -31,6 +35,11 @@ namespace torch::detail {
 
 struct TORCH_API PyObjectConversionInterface {
   virtual ~PyObjectConversionInterface() = default;
+
+#ifdef USE_DISTRIBUTED
+  virtual std::shared_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+      PyObject* obj) const = 0;
+#endif
 
   // Unpack a Python torch.Tensor (PyObject*) into an at::Tensor that shares the
   // underlying TensorImpl. The GIL must be held.
