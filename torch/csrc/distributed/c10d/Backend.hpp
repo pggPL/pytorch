@@ -749,15 +749,6 @@ class TORCH_API Backend : public torch::CustomClassHolder {
     return bound_device_id_;
   }
 
-  // Borrow an existing collective communicator without initializing one.
-  virtual void* getNCCLComm(at::Device device) {
-    TORCH_CHECK(
-        false,
-        "Backend ",
-        getBackendName(),
-        " does not expose an NCCL communicator");
-  }
-
   // Perform an eager connect to the specified device if the backend supports
   // it.
   virtual void eagerConnectSingleDevice(at::Device device) {

@@ -3,6 +3,7 @@
 #include <ATen/core/Tensor.h>
 #include <c10/util/python_stub.h>
 #include <torch/csrc/Export.h>
+#include <memory>
 #ifdef USE_DISTRIBUTED
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #endif
@@ -36,7 +37,7 @@ struct TORCH_API PyObjectConversionInterface {
   virtual ~PyObjectConversionInterface() = default;
 
 #ifdef USE_DISTRIBUTED
-  virtual c10::intrusive_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+  virtual std::shared_ptr<c10d::ProcessGroup> process_group_from_pyobject(
       PyObject* obj) const = 0;
 #endif
 

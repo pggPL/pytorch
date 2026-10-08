@@ -17,11 +17,4 @@ TEST(TorchStableC10d, InvalidHandles) {
   EXPECT_EQ(torch_work_is_completed(nullptr, &completed), AOTI_TORCH_FAILURE);
   EXPECT_EQ(torch_delete_process_group(nullptr), AOTI_TORCH_SUCCESS);
   EXPECT_EQ(torch_delete_work(nullptr), AOTI_TORCH_SUCCESS);
-  void* comm = &rank;
-  EXPECT_EQ(
-      torch_process_group_get_nccl_comm(nullptr, 0, &comm), AOTI_TORCH_FAILURE);
-  EXPECT_EQ(comm, nullptr);
-  EXPECT_EQ(
-      torch_process_group_get_nccl_comm(nullptr, 0, nullptr),
-      AOTI_TORCH_FAILURE);
 }

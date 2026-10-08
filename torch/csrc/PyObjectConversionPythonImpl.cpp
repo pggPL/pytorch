@@ -17,7 +17,7 @@ namespace {
 
 struct ConcretePyObjectConversion final : PyObjectConversionInterface {
 #ifdef USE_DISTRIBUTED
-  c10::intrusive_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+  std::shared_ptr<c10d::ProcessGroup> process_group_from_pyobject(
       PyObject* obj) const override {
     TORCH_CHECK(
         PyGILState_Check(),
@@ -26,8 +26,15 @@ struct ConcretePyObjectConversion final : PyObjectConversionInterface {
     TORCH_CHECK(
         pybind11::isinstance<c10d::ProcessGroup>(pybind11::handle(obj)),
         "torch_process_group_from_pyobject: expected ProcessGroup");
-    return pybind11::cast<c10::intrusive_ptr<c10d::ProcessGroup>>(
+    auto group = pybind11::cast<c10::intrusive_ptr<c10d::ProcessGroup>>(
         pybind11::handle(obj));
+    // Retain Python overrides and the holder's GIL-aware native destruction.
+    Py_INCREF(obj);
+    std::shared_ptr<PyObject> owner(obj, [](PyObject* value) {
+      pybind11::gil_scoped_acquire gil;
+      Py_DECREF(value);
+    });
+    return std::shared_ptr<c10d::ProcessGroup>(std::move(owner), group.get());
   }
 #endif
 

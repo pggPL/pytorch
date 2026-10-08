@@ -52,10 +52,6 @@ class TORCH_API ProcessGroupNCCLLazy
   void addEphemeralTimeout(const std::chrono::milliseconds& timeout) override {
     getPrimary()->addEphemeralTimeout(timeout);
   }
-
-  void* getNCCLComm(at::Device device) override {
-    return getPrimary()->getNCCLComm(device);
-  }
 };
 
 } // namespace c10d::nccl2

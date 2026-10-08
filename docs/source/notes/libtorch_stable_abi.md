@@ -277,9 +277,11 @@ C++ APIs in ``torch/csrc/stable`` or ``torch/headeronly`` are subject to the sam
 ### Process groups and collective work (2.16+)
 
 `torch::stable::c10d::ProcessGroup::from_pyobject(obj)` acquires an owning
-reference to an existing Python ProcessGroup. The conversion requires the GIL
-and `libtorch_python`; other operations do not require Python. Copies of the
-stable wrapper share ownership. Group creation, registration, and destruction
+reference to an existing Python ProcessGroup, preserving Python overrides.
+The conversion requires the GIL and `libtorch_python`. Other calls do not
+require the caller to hold the GIL; callbacks and ownership release acquire it
+as needed. Copies of the stable wrapper share ownership. Release all handles
+before Python interpreter shutdown. Group creation, registration, and destruction
 remain with the caller's distributed setup.
 
 The wrapper exposes rank, size, backend name, allreduce, allreduce_coalesced,
@@ -300,37 +302,5 @@ external mutation/freeing of tensor storage. Consumers must retain external
 buffers and follow their backend's stream and graph lifetime requirements.
 
 The C entry points are exported even without distributed support and report a
-clear error in that configuration. This API does not expose symmetric-memory
-windows or arbitrary TorchBind objects.
-
-#### Borrowing an NCCL communicator
-
-`group.nccl_comm(device_index)` returns the existing collective `ncclComm_t`
-as `void*`, through `torch_process_group_get_nccl_comm`. It supports the legacy,
-NCCL2, and lazy NCCL2 backends; lazy NCCL2 returns its primary collective
-communicator, not a point-to-point communicator. The explicit CUDA device index
-does not change the caller's current device. No NCCL header is required to use
-the stable wrapper.
-
-Initialize the group on the requested device first, for example with a matching
-barrier on all ranks, outside CUDA graph capture. The getter never creates a
-communicator or launches a collective. Like the native legacy getter, it may
-wait for an existing nonblocking communicator to become ready. An unsupported
-backend, missing communicator, or invalid device raises an error; the C output
-is null on failure. Backend failures propagate through the usual shim error
-mechanism. A warmed-up communicator can be queried during capture.
-
-The pointer is borrowed, local to this process, and owned by the process group.
-Keep an owning group handle through all external GPU work and graph replays.
-Do not free the communicator, or destroy, abort, suspend, or reconfigure its
-group while it is in use. Ownership does not prevent explicit teardown or
-watchdog failure. External operations are not tracked by the group's Work or
-watchdog: the caller must handle readiness, errors, matching collective order,
-and stream dependencies, including ordering against PyTorch operations.
-
-Extensions that link NCCL can cast the result to `ncclComm_t`. Bindings that
-already accept an integer address can use `reinterpret_cast<uintptr_t>(comm)`;
-for example, TE's `ep_initialize` and `cusolvermp_ctx_create` accept this form.
-The stable PyTorch ABI does not guarantee compatibility with an independently
-loaded, incompatible NCCL library, and this handle does not identify a
-symmetric-memory window or its registration.
+clear error in that configuration. This API does not expose native NCCL
+communicators, symmetric-memory windows, or arbitrary TorchBind objects.

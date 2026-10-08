@@ -17,7 +17,7 @@ constexpr const char* kNoImplMsg =
 // silent misbehavior.
 struct NoopPyObjectConversion final : PyObjectConversionInterface {
 #ifdef USE_DISTRIBUTED
-  c10::intrusive_ptr<c10d::ProcessGroup> process_group_from_pyobject(
+  std::shared_ptr<c10d::ProcessGroup> process_group_from_pyobject(
       PyObject* /*obj*/) const override {
     TORCH_CHECK(
         false, "torch_process_group_from_pyobject requires libtorch_python");

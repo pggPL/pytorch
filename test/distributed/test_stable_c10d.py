@@ -3,21 +3,36 @@
 import ctypes
 import gc
 import os
+import sys
 import tempfile
+import threading
 import unittest
+import weakref
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
-from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
+from torch.testing._internal.common_utils import (
+    find_library_location,
+    instantiate_parametrized_tests,
+    IS_WINDOWS,
+    parametrize,
+    run_tests,
+    TestCase,
+)
 
 
 class StableC10d:
     def __init__(self, group):
-        self.lib = ctypes.CDLL(torch._C.__file__)
-        self.py = ctypes.PyDLL(torch._C.__file__)
+        library = (
+            str(find_library_location("torch_cpu.dll"))
+            if IS_WINDOWS
+            else torch._C.__file__
+        )
+        self.lib = ctypes.CDLL(library)
+        self.py = ctypes.PyDLL(library)
         handle = ctypes.c_void_p
         output = ctypes.POINTER(handle)
         tensor_array = ctypes.POINTER(handle)
@@ -27,7 +42,6 @@ class StableC10d:
             "torch_process_group_rank": [handle, ctypes.POINTER(ctypes.c_int64)],
             "torch_process_group_size": [handle, ctypes.POINTER(ctypes.c_int64)],
             "torch_process_group_backend": [handle, output],
-            "torch_process_group_get_nccl_comm": [handle, ctypes.c_int32, output],
             "torch_string_c_str": [handle, ctypes.POINTER(ctypes.c_char_p)],
             "torch_delete_string": [handle],
             "torch_process_group_allreduce": [
@@ -98,15 +112,6 @@ class StableC10d:
             handles[index] = out
         return handles
 
-    def nccl_comm(self, device_index):
-        comm = ctypes.c_void_p()
-        self.check(
-            self.lib.torch_process_group_get_nccl_comm(
-                self.group, device_index, ctypes.byref(comm)
-            )
-        )
-        return comm.value
-
     def launch(self, name, tensors, *args):
         handles = self.tensors(tensors)
         work = ctypes.c_void_p()
@@ -157,10 +162,6 @@ def run_rank(rank, rendezvous):
         api.check(api.lib.torch_string_c_str(backend, ctypes.byref(name)))
         case.assertEqual(name.value, b"gloo")
         api.check(api.lib.torch_delete_string(backend))
-        with case.assertRaisesRegex(
-            RuntimeError, "does not expose an NCCL communicator|no CUDA backend"
-        ):
-            api.nccl_comm(0)
         with case.assertRaisesRegex(RuntimeError, "expected ProcessGroup"):
             StableC10d(None)
         single_group = dist.new_group(
@@ -232,8 +233,63 @@ def run_rank(rank, rendezvous):
         dist.destroy_process_group()
 
 
+@instantiate_parametrized_tests
 @unittest.skipUnless(dist.is_available() and dist.is_gloo_available(), "requires Gloo")
 class TestStableC10d(TestCase):
+    @parametrize("last_owner", ["group", "work"])
+    @parametrize("gil_held", [False, True])
+    def test_python_group_lifetime(self, last_owner, gil_held):
+        class PythonWork(dist.Work):
+            def __init__(self, group):
+                super().__init__()
+                self.group = weakref.ref(group)
+
+            def wait(self, timeout):
+                return self.group() is not None
+
+        class PythonGroup(dist.ProcessGroup):
+            def __init__(self):
+                super().__init__(0, 1)
+
+            def getRank(self):
+                return 7
+
+            def allreduce(self, tensors, options):
+                return PythonWork(self)
+
+        group = PythonGroup()
+        group_ref = weakref.ref(group)
+        api = StableC10d(group)
+        work = None
+        try:
+            del group
+            gc.collect()
+            self.assertIsNotNone(group_ref())
+            rank = ctypes.c_int64()
+            api.check(api.lib.torch_process_group_rank(api.group, ctypes.byref(rank)))
+            self.assertEqual(rank.value, 7)
+            library = api.py if gil_held else api.lib
+            if last_owner == "work":
+                work = api.launch("allreduce", [torch.ones(1)], 0)
+                api.close()
+                gc.collect()
+                self.assertIsNotNone(group_ref())
+                done = ctypes.c_bool()
+                api.check(library.torch_work_wait(work, 0, ctypes.byref(done)))
+                self.assertTrue(done.value)
+                api.check(library.torch_delete_work(work))
+                work = None
+            else:
+                api.check(library.torch_delete_process_group(api.group))
+                api.group = None
+            gc.collect()
+            self.assertIsNone(group_ref())
+        finally:
+            if work is not None:
+                api.check(api.lib.torch_delete_work(work))
+            if api.group:
+                api.close()
+
     def test_two_rank_collectives(self):
         with tempfile.TemporaryDirectory() as directory:
             mp.spawn(
@@ -241,8 +297,61 @@ class TestStableC10d(TestCase):
             )
 
 
+def run_final_owner_delete(device, last_owner):
+    torch.cuda.set_device(device)
+    store = dist.HashStore()
+    backend = dist.ProcessGroupNCCL(store, 0, 1)
+    parent = dist.ProcessGroup(store, 0, 1)
+    parent._register_backend(
+        torch.device(device), dist.ProcessGroup.BackendType.NCCL, backend
+    )
+    parent._set_default_backend(dist.ProcessGroup.BackendType.NCCL)
+    value = torch.ones(1, device=device)
+    parent.allreduce([value]).wait()
+    torch.cuda.synchronize(device)
+    group = parent.split_group([0])
+    group._enable_collectives_timing()
+    entered, finished, blocker = threading.Event(), threading.Event(), threading.Event()
+
+    def hook(info):
+        entered.set()
+        blocker.wait()
+        finished.set()
+
+    group._register_on_completion_hook(hook)
+    api = StableC10d(group)
+    work = api.launch("allreduce", [value], 0)
+    done = ctypes.c_bool()
+    api.check(api.lib.torch_work_wait(work, 0, ctypes.byref(done)))
+    torch.cuda.synchronize(device)
+    if not entered.wait(timeout=10):
+        raise AssertionError("completion hook was not entered")
+    del group
+    gc.collect()
+    if last_owner == "group":
+        api.check(api.lib.torch_delete_work(work))
+    else:
+        api.close()
+    if last_owner == "group":
+        delete, handle = api.py.torch_delete_process_group, api.group
+    else:
+        delete, handle = api.py.torch_delete_work, work
+    interval = sys.getswitchinterval()
+    try:
+        # The hook must acquire the GIL during deletion, not before the call.
+        sys.setswitchinterval(120)
+        blocker.set()
+        result = delete(handle)
+    finally:
+        sys.setswitchinterval(interval)
+    api.check(result)
+    if not finished.is_set():
+        raise AssertionError("group destruction did not finish the hook")
+    parent.shutdown()
+
+
 @unittest.skipUnless(dist.is_available() and dist.is_nccl_available(), "requires NCCL")
-class TestStableNCCLComm(TestCase):
+class TestStableC10dNCCL(TestCase):
     def make_group(self, backend_name, device):
         store = dist.HashStore()
         backend = getattr(dist, backend_name)(store, 0, 1)
@@ -252,66 +361,35 @@ class TestStableNCCLComm(TestCase):
         )
         return group, backend, StableC10d(group)
 
+    @parametrize("last_owner", ["group", "work"])
+    def test_final_owner_with_gil(self, device, last_owner):
+        process = mp.get_context("spawn").Process(
+            target=run_final_owner_delete, args=(device, last_owner)
+        )
+        process.start()
+        try:
+            process.join(timeout=60)
+            self.assertFalse(process.is_alive(), "group destruction deadlocked")
+            self.assertEqual(process.exitcode, 0)
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join()
+
     @parametrize(
         "backend_name",
         ["ProcessGroupNCCL", "ProcessGroupNCCL2", "ProcessGroupNCCLLazy"],
     )
-    def test_borrowed_communicator(self, device, backend_name):
-        index = torch.device(device).index
+    def test_collective_cuda_graph(self, device, backend_name):
         group, backend, api = self.make_group(backend_name, device)
-        second = None
         graph = None
         work = None
         try:
-            with torch.cuda.device(device):
-                initial_comm = backend.comm_ptr
-            if backend_name == "ProcessGroupNCCL":
-                self.assertEqual(initial_comm, 0)
-                with self.assertRaisesRegex(RuntimeError, "not initialized"):
-                    api.nccl_comm(index)
-                with torch.cuda.device(device):
-                    self.assertEqual(backend.comm_ptr, 0)
-            else:
-                self.assertEqual(api.nccl_comm(index), initial_comm)
-            for invalid in (-1, 128, 65536):
-                comm = ctypes.c_void_p(1)
-                with self.assertRaisesRegex(RuntimeError, "invalid CUDA device index"):
-                    api.check(
-                        api.lib.torch_process_group_get_nccl_comm(
-                            api.group, invalid, ctypes.byref(comm)
-                        )
-                    )
-                self.assertIsNone(comm.value)
-
             value = torch.zeros(4, device=device)
             group.allreduce([value]).wait()
             torch.cuda.synchronize(device)
-            comm = api.nccl_comm(index)
-            self.assertNotEqual(comm, 0)
-            with torch.cuda.device(device):
-                self.assertEqual(comm, backend.comm_ptr)
-
-            other_group, other_backend, second = self.make_group(backend_name, device)
-            other_group.allreduce([value]).wait()
-            torch.cuda.synchronize(device)
-            self.assertNotEqual(comm, second.nccl_comm(index))
-            other_group.shutdown()
-            retired = ctypes.c_void_p(1)
-            with self.assertRaisesRegex(
-                RuntimeError, "aborted|shut down|not initialized"
-            ):
-                second.check(
-                    second.lib.torch_process_group_get_nccl_comm(
-                        second.group, index, ctypes.byref(retired)
-                    )
-                )
-            self.assertIsNone(retired.value)
-            del other_group, other_backend
-            second.close()
-
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                self.assertEqual(api.nccl_comm(index), comm)
                 value.add_(1)
                 work = api.launch("allreduce", [value], 0)
                 done = ctypes.c_bool()
@@ -324,43 +402,16 @@ class TestStableNCCLComm(TestCase):
                 graph.replay()
                 torch.cuda.synchronize(device)
                 self.assertEqual(value, torch.full_like(value, expected))
-                self.assertEqual(api.nccl_comm(index), comm)
         finally:
             torch.cuda.synchronize(device)
             if graph is not None:
                 graph.reset()
             if work is not None:
                 api.check(api.lib.torch_delete_work(work))
-            if second is not None and second.group:
-                second.close()
-            api.close()
-
-    @unittest.skipIf(torch.cuda.device_count() < 2, "requires two CUDA devices")
-    @parametrize(
-        "backend_name",
-        ["ProcessGroupNCCL", "ProcessGroupNCCL2", "ProcessGroupNCCLLazy"],
-    )
-    def test_explicit_device(self, device, backend_name):
-        index = torch.device(device).index
-        other = (index + 1) % torch.cuda.device_count()
-        group, backend, api = self.make_group(backend_name, device)
-        try:
-            value = torch.ones(4, device=device)
-            group.allreduce([value]).wait()
-            torch.cuda.synchronize(device)
-            with torch.cuda.device(device):
-                comm = backend.comm_ptr
-            with torch.cuda.device(other):
-                self.assertEqual(api.nccl_comm(index), comm)
-                self.assertEqual(torch.cuda.current_device(), other)
-                with self.assertRaisesRegex(RuntimeError, "not initialized|belongs to"):
-                    api.nccl_comm(other)
-                self.assertEqual(torch.cuda.current_device(), other)
-        finally:
             api.close()
 
 
-instantiate_device_type_tests(TestStableNCCLComm, globals(), only_for="cuda")
+instantiate_device_type_tests(TestStableC10dNCCL, globals(), only_for="cuda")
 
 
 if __name__ == "__main__":
